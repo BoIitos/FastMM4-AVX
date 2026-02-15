@@ -495,7 +495,7 @@ var
 
   procedure UpdateVMGraph(var AMemoryMap: TMemoryMapEx);
   var
-    LInd, LIndTop, I1: Integer;
+    LInd, LIndTop, I1: Cardinal;
     LChunkState: TChunkStatusEx;
     LMBI: TMemoryBasicInformation;
     LA_Char: array[0..MAX_PATH] of Char;

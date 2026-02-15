@@ -18643,7 +18643,7 @@ begin
       {Set the status of all the chunks in the region}
       if LMBI.State = MEM_COMMIT then
       begin
-        LCharToFill := AnsiChar(csSysReserved);
+        LCharToFill := AnsiChar(csSysAllocated);
         FillChar(AMemoryMap[LIndNUI], LNextChunk - LIndNUI, LCharToFill);
       end
       else

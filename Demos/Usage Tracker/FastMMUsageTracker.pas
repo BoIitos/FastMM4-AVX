@@ -495,7 +495,7 @@ var
 
   procedure UpdateVMGraph(var AMemoryMap: TMemoryMapEx);
   var
-    LInd, LIndTop, I1: Integer;
+    LInd, LIndTop, I1: Cardinal;
     LChunkState: TChunkStatusEx;
     LMBI: TMemoryBasicInformation;
     LA_Char: array[0..MAX_PATH] of Char;
@@ -743,18 +743,18 @@ var
         Add('System Info:');
         Add('------------');
 
-        Add('Processor Count                   = ' + IntToStr(LR_SystemInfo.dwNumberOfProcessors));
-        Add('Allocation Granularity            = ' + IntToStr(LR_SystemInfo.dwAllocationGranularity));
+        Add('Processor Count                 = ' + IntToStr(LR_SystemInfo.dwNumberOfProcessors));
+        Add('Allocation Granularity          = ' + IntToStr(LR_SystemInfo.dwAllocationGranularity));
 
         if Assigned(MP_GlobalMemoryStatusEx) then
         begin
           with LR_GlobalMemoryStatusEx do
           begin
-            Add('Available Physical Memory         = ' + Int64ToKStringFormatted(ullAvailPhys));
-            Add('Total Physical Memory             = ' + Int64ToKStringFormatted(ullTotalPhys));
-            Add('Available Virtual Memory          = ' + Int64ToKStringFormatted(ullAvailVirtual));
-            Add('Total Virtual Memory              = ' + Int64ToKStringFormatted(ullTotalVirtual));
-            Add('Total Virtual Extended Memory     = ' + Int64ToKStringFormatted(ullAvailExtendedVirtual));
+            Add('Available Physical Memory       = ' + Int64ToKStringFormatted(ullAvailPhys));
+            Add('Total Physical Memory           = ' + Int64ToKStringFormatted(ullTotalPhys));
+            Add('Available Virtual Memory        = ' + Int64ToKStringFormatted(ullAvailVirtual));
+            Add('Total Virtual Memory            = ' + Int64ToKStringFormatted(ullTotalVirtual));
+            Add('Total Virtual Extended Memory   = ' + Int64ToKStringFormatted(ullAvailExtendedVirtual));
           end;
         end
 
@@ -762,10 +762,10 @@ var
         begin
           with LR_GlobalMemoryStatus do
           begin
-            Add('Available Physical Memory         = ' + Int64ToKStringFormatted(dwAvailPhys));
-            Add('Total Physical Memory             = ' + Int64ToKStringFormatted(dwTotalPhys));
-            Add('Available Virtual Memory          = ' + Int64ToKStringFormatted(dwAvailVirtual));
-            Add('Total Virtual Memory              = ' + Int64ToKStringFormatted(dwTotalVirtual));
+            Add('Available Physical Memory       = ' + Int64ToKStringFormatted(dwAvailPhys));
+            Add('Total Physical Memory           = ' + Int64ToKStringFormatted(dwTotalPhys));
+            Add('Available Virtual Memory        = ' + Int64ToKStringFormatted(dwAvailVirtual));
+            Add('Total Virtual Memory            = ' + Int64ToKStringFormatted(dwTotalVirtual));
           end;
         end;
 
@@ -774,11 +774,11 @@ var
           if MP_NtQuerySystemInformation(SystemBasicInformation, @LR_SysBaseInfo, SizeOf(LR_SysBaseInfo), nil) = 0 then
           begin
             with LR_SysBaseInfo do begin
-              Add('Maximum Increment                 = ' + CardinalToKStringFormatted(uKeMaximumIncrement));
-              Add('Page Size                         = ' + CardinalToKStringFormatted(uPageSize));
-              Add('Number of Physical Pages          = ' + CardinalToKStringFormatted(uMmNumberOfPhysicalPages));
-              Add('Lowest Physical Page              = ' + CardinalToStringFormatted(uMmLowestPhysicalPage));
-              Add('Highest Physical Page             = ' + CardinalToKStringFormatted(uMmHighestPhysicalPage));
+              Add('Maximum Increment               = ' + CardinalToKStringFormatted(uKeMaximumIncrement));
+              Add('Page Size                       = ' + CardinalToKStringFormatted(uPageSize));
+              Add('Number of Physical Pages        = ' + CardinalToKStringFormatted(uMmNumberOfPhysicalPages));
+              Add('Lowest Physical Page            = ' + CardinalToStringFormatted(uMmLowestPhysicalPage));
+              Add('Highest Physical Page           = ' + CardinalToKStringFormatted(uMmHighestPhysicalPage));
             end;
           end;
         end;
@@ -799,35 +799,35 @@ var
         begin
           with LR_ProcessMemoryCounters do
           begin
-            Add('Page Fault Count                  = ' + CardinalToKStringFormatted(PageFaultCount));
-            Add('Peak Working Set Size             = ' + Int64ToKStringFormatted(PeakWorkingSetSize));
-            Add('Working Set Size                  = ' + Int64ToKStringFormatted(WorkingSetSize));
-            Add('Quota Peak Paged Pool Usage       = ' + Int64ToKStringFormatted(QuotaPeakPagedPoolUsage));
-            Add('Quota Paged Pool Usage            = ' + Int64ToKStringFormatted(QuotaPagedPoolUsage));
-            Add('Quota Peak Non-Paged Pool Usage  = ' + Int64ToKStringFormatted(QuotaPeakNonPagedPoolUsage));
-            Add('Quota Non-Paged Pool Usage       = ' + Int64ToKStringFormatted(QuotaNonPagedPoolUsage));
-            Add('Pagefile Usage                    = ' + Int64ToKStringFormatted(PagefileUsage));
-            Add('Peak Pagefile Usage               = ' + Int64ToKStringFormatted(PeakPagefileUsage));
+            Add('Page Fault Count                = ' + CardinalToKStringFormatted(PageFaultCount));
+            Add('Peak Working Set Size           = ' + Int64ToKStringFormatted(PeakWorkingSetSize));
+            Add('Working Set Size                = ' + Int64ToKStringFormatted(WorkingSetSize));
+            Add('Quota Peak Paged Pool Usage     = ' + Int64ToKStringFormatted(QuotaPeakPagedPoolUsage));
+            Add('Quota Paged Pool Usage          = ' + Int64ToKStringFormatted(QuotaPagedPoolUsage));
+            Add('Quota Peak Non-Paged Pool Usage = ' + Int64ToKStringFormatted(QuotaPeakNonPagedPoolUsage));
+            Add('Quota Non-Paged Pool Usage      = ' + Int64ToKStringFormatted(QuotaNonPagedPoolUsage));
+            Add('Pagefile Usage                  = ' + Int64ToKStringFormatted(PagefileUsage));
+            Add('Peak Pagefile Usage             = ' + Int64ToKStringFormatted(PeakPagefileUsage));
           end;
         end;
 
         Add('');
         Add('Process Info: PID (' + IntToStr(GetCurrentProcessId) + ')');
         Add('------------------------');
-        Add('Minimum Address                   = ' + Int64ToKStringFormatted(NativeUInt(LR_SystemInfo.lpMinimumApplicationAddress)));
-        Add('Maximum VM Address                = ' + Int64ToKStringFormatted(NativeUInt(LR_SystemInfo.lpMaximumApplicationAddress)));
-        Add('Page Protection & Commit Size     = ' + IntToStr(LR_SystemInfo.dWPageSize));
+        Add('Minimum Address                 = ' + Int64ToKStringFormatted(NativeUInt(LR_SystemInfo.lpMinimumApplicationAddress)));
+        Add('Maximum VM Address              = ' + Int64ToKStringFormatted(NativeUInt(LR_SystemInfo.lpMaximumApplicationAddress)));
+        Add('Page Protection & Commit Size   = ' + IntToStr(LR_SystemInfo.dWPageSize));
         Add('');
         Add('Quota info:');
         Add('-----------');
-        Add('Minimum Quota                     = ' + Int64ToKStringFormatted(LU_MinQuota));
-        Add('Maximum Quota                     = ' + Int64ToKStringFormatted(LU_MaxQuota));
+        Add('Minimum Quota                   = ' + Int64ToKStringFormatted(LU_MinQuota));
+        Add('Maximum Quota                   = ' + Int64ToKStringFormatted(LU_MaxQuota));
         Add('');
         Add('VM Info:');
         Add('--------');
-        Add('Total Free                        = ' + Int64ToKStringFormatted(LU_MEM_FREE));
-        Add('Total Reserve                     = ' + Int64ToKStringFormatted(LU_MEM_RESERVE));
-        Add('Total Commit                      = ' + Int64ToKStringFormatted(LU_MEM_COMMIT));
+        Add('Total Free                      = ' + Int64ToKStringFormatted(LU_MEM_FREE));
+        Add('Total Reserve                   = ' + Int64ToKStringFormatted(LU_MEM_RESERVE));
+        Add('Total Commit                    = ' + Int64ToKStringFormatted(LU_MEM_COMMIT));
 
         if LP_FreeVMList.Count > CI_MaxFreeBlocksList then
           LI_Max := CI_MaxFreeBlocksList - 1
@@ -836,15 +836,15 @@ var
 
         for LI_I := 0 to LI_Max do
         begin
-          Add('Largest Free Block ' + IntToStr(LI_I + 1) + '.             = ' + Int64ToKStringFormatted(NativeUInt(LP_FreeVMList.List[LI_I])));
+          Add('Largest Free Block ' + IntToStr(LI_I + 1) + '.           = ' + Int64ToKStringFormatted(NativeUInt(LP_FreeVMList.List[LI_I])));
         end;
 
         Add('');
         Add('FastMM4 Info:');
         Add('-------------');
-        Add('Total Blocks                      = ' + Int64ToKStringFormatted(LTotalBlocks));
-        Add('Total Allocated                   = ' + Int64ToKStringFormatted(LTotalAllocated));
-        Add('Total Reserved                    = ' + Int64ToKStringFormatted(LTotalReserved));
+        Add('Total Blocks                    = ' + Int64ToKStringFormatted(LTotalBlocks));
+        Add('Total Allocated                 = ' + Int64ToKStringFormatted(LTotalAllocated));
+        Add('Total Reserved                  = ' + Int64ToKStringFormatted(LTotalReserved));
       end;
 
     finally

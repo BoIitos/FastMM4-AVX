@@ -394,7 +394,7 @@ be able to use efficient locking without inline assembly.}
    address space and contains bad pointer arithmetic code, this option should
    help to catch those errors sooner.}
 
-  {$define AlwaysAllocateTopDown}
+  {.$define AlwaysAllocateTopDown}
 
 
   {Disables the logging of memory dumps together with the other detail for

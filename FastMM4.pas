@@ -1924,8 +1924,7 @@ type
   end;
 
   {Memory map}
-  TChunkStatus = (csUnallocated, csAllocated, csReserved, csSysAllocated,
-    csSysReserved);
+  TChunkStatus = (csUnallocated, csAllocatedSmall, csAllocatedMedium, csAllocatedLarge, csReservedMedium, csSysAllocated, csSysReserved);
   TMemoryMap = array[0..65535] of TChunkStatus;
 
 {$IFDEF EnableMemoryLeakReporting}
@@ -18534,12 +18533,16 @@ end;
  returns only the state for the low 4GB.}
 procedure GetMemoryMap(var AMemoryMap: TMemoryMap);
 var
+  LPMediumBlock: Pointer;
   LPMediumBlockPoolHeader: PMediumBlockPoolHeader;
+  LMediumBlockSize: Cardinal;
   LPLargeBlock: PLargeBlockHeader;
   LIndNUI,
   LChunkIndex,
   LNextChunk,
+  LMediumBlockHeader,
   LLargeBlockSize: NativeUInt;
+  ChunkStatus: TChunkStatus;
   LMBI: TMemoryBasicInformation;
   LCharToFill: AnsiChar;
 {$IFDEF LogLockContention}
@@ -18575,11 +18578,35 @@ begin
     begin
       if (LChunkIndex + LIndNUI) > High(AMemoryMap) then
         Break;
-      AMemoryMap[LChunkIndex + LIndNUI] := csAllocated;
+      AMemoryMap[LChunkIndex + LIndNUI] := csReservedMedium;
+    end;
+
+    LPMediumBlock := GetFirstMediumBlockInPool(LPMediumBlockPoolHeader);
+    while LPMediumBlock <> nil do
+    begin
+      LMediumBlockHeader := PNativeUInt(PByte(LPMediumBlock) - BlockHeaderSize)^;
+      if (LMediumBlockHeader and IsFreeBlockFlag) = 0 then
+      begin
+        if (LMediumBlockHeader and IsSmallBlockPoolInUseFlag) <> 0
+          then ChunkStatus:=csAllocatedSmall
+          else ChunkStatus:=csAllocatedMedium;
+      end;
+      {Get the block size}
+      LMediumBlockSize := LMediumBlockHeader and DropMediumAndLargeFlagsMask;
+      LChunkIndex := NativeUInt(LPMediumBlock) shr 16;
+      for LIndNUI := 0 to (LMediumBlockSize - 1) shr 16 do
+      begin
+        if (LChunkIndex + LIndNUI) > High(AMemoryMap) then
+          Break;
+        AMemoryMap[LChunkIndex + LIndNUI] := ChunkStatus;
+      end;
+      {Next medium block}
+      LPMediumBlock := NextMediumBlock(LPMediumBlock);
     end;
     {Get the next medium block pool}
     LPMediumBlockPoolHeader := LPMediumBlockPoolHeader^.NextMediumBlockPoolHeader;
   end;
+
 {$IFNDEF AssumeMultiThreaded}
   if LMediumBlocksLocked then
 {$ENDIF}
@@ -18607,7 +18634,7 @@ begin
     begin
       if (LChunkIndex + LIndNUI) > High(AMemoryMap) then
         Break;
-      AMemoryMap[LChunkIndex + LIndNUI] := csAllocated;
+      AMemoryMap[LChunkIndex + LIndNUI] := csAllocatedLarge;
     end;
     {Get the next large block}
     LPLargeBlock := LPLargeBlock^.NextLargeBlockHeader;

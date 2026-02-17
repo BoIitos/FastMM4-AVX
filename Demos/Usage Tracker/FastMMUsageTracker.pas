@@ -1,6 +1,6 @@
 (*
 
-Fast Memory Manager Usage Tracker 2.00
+Fast Memory Manager Usage Tracker 3.00
 
 Description:
 
@@ -19,7 +19,7 @@ Description:
  - General Information
     - System memory usage
     - Process memory usage
-    - 5 Largest contiguous free VM memory spaces
+    - 9 Largest contiguous free VM memory spaces
     - FastMM4 summary information
 
 Usage:
@@ -43,6 +43,10 @@ Change log:
   - Colour coding of changes in the allocation map added by Murray McGowan
     (red for an increase in usage, green for a decrease). (Thanks Murray!)
 
+  Version 3.00 (15 February 2026):
+  - Window is now resizeable
+  - The VM graph can now distinguish between small, medium and large blocks
+  - Enhanced readability
 *)
 
 unit FastMMUsageTracker;
@@ -50,28 +54,52 @@ unit FastMMUsageTracker;
 interface
 
 uses
-  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
-  Dialogs, StdCtrls, ExtCtrls, Grids, Buttons, ComCtrls, Menus, FastMM4;
+
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms, PsAPI,
+  Dialogs, StdCtrls, ExtCtrls, Grids, Buttons, ComCtrls, Menus, Clipbrd, FastMM4;
 
 type
-  TChunkStatusEx = (
-    {Items that correspond to the same entry in TChunkStatus}
-    csExUnallocated,
-    csExAllocated,
-    csExReserved,
-    csExSysAllocated,
-    csExSysReserved,
-    {TChunkStatusEx additional detail}
-    csExSysExe,
-    csExSysDLL);
 
-  TMemoryMapEx = array[0..65535] of TChunkStatusEx;
+  TChunkStatusEx = (csExUnallocated,       {Items that correspond to the same entry in TChunkStatus}
+                    csExAllocatedSmall,
+                    csExAllocatedMedium,
+                    csExAllocatedLarge,
+                    csExReservedMedium,
+                    csExSysAllocated,
+                    csExSysReserved,
+                    csExSysExe,            {TChunkStatusEx additional detail}
+                    csExSysDLL);
 
-  TfFastMMUsageTracker = class(TForm)
+const
+
+  TChunkCaption : Array[TChunkStatusEx] of String
+                = ('Free',
+                   'FastMM Allocated (small blocks)',
+                   'FastMM Allocated (medium blocks)',
+                   'FastMM Allocated (large blocks)',
+                   'FastMM Reserved',
+                   'System Allocated',
+                   'System Reserved',
+                   'Exe',
+                   'DLL');
+
+  TChunkColor : Array[TChunkStatusEx] of TColor
+              = ($FFFFFF,
+                 $AAAAFF,
+                 $FF00FF,
+                 $0000FF,
+                 $00FFFF,
+                 $707070,
+                 $C0C0C0,
+                 $00FF00,
+                 $FF0000);
+
+type
+
+  TMemoryMapEx = Array[0..65535] of TChunkStatusEx;
+
+  TFormFastMMUsageTracker = class(TForm)
     tTimer: TTimer;
-    bClose: TBitBtn;
-    bUpdate: TBitBtn;
-    ChkAutoUpdate: TCheckBox;
     smVMDump: TPopupMenu;
     smMM4Allocation: TPopupMenu;
     smGeneralInformation: TPopupMenu;
@@ -85,15 +113,13 @@ type
     tsGeneralInformation: TTabSheet;
     mVMStatistics: TMemo;
     sgVMDump: TStringGrid;
-    Label1: TLabel;
-    Label2: TLabel;
-    Label3: TLabel;
-    eAddress: TEdit;
-    eState: TEdit;
-    eDLLName: TEdit;
-    ChkSmallGraph: TCheckBox;
     sgBlockStatistics: TStringGrid;
     dgMemoryMap: TDrawGrid;
+    Panel1: TPanel;
+    bClose: TBitBtn;
+    bUpdate: TBitBtn;
+    ChkAutoUpdate: TCheckBox;
+    StatusBar: TStatusBar;
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure tTimerTimer(Sender: TObject);
     procedure FormCreate(Sender: TObject);
@@ -104,7 +130,6 @@ type
       var CanSelect: Boolean);
     procedure bUpdateClick(Sender: TObject);
     procedure ChkAutoUpdateClick(Sender: TObject);
-    procedure ChkSmallGraphClick(Sender: TObject);
     procedure sgVMDumpMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
     procedure sgVMDumpMouseUp(Sender: TObject; Button: TMouseButton;
@@ -130,12 +155,9 @@ type
     procedure RefreshSnapShot;
   end;
 
-function ShowFastMMUsageTracker: TfFastMMUsageTracker;
+function ShowFastMMUsageTracker: TFormFastMMUsageTracker;
 
 implementation
-
-uses
-  Clipbrd, PsAPI;
 
 {$R *.dfm}
 
@@ -206,9 +228,9 @@ var
 // Various Global Procedures
 //-----------------------------------------------------------------------------
 
-function ShowFastMMUsageTracker: TfFastMMUsageTracker;
+function ShowFastMMUsageTracker: TFormFastMMUsageTracker;
 begin
-  Application.CreateForm(TfFastMMUsageTracker, Result);
+  Application.CreateForm(TFormFastMMUsageTracker, Result);
   if Assigned(Result) then
   begin
     Result.RefreshSnapShot;
@@ -276,7 +298,7 @@ end;
 // Form TfFastMMUsageTracker
 //-----------------------------------------------------------------------------
 
-procedure TfFastMMUsageTracker.FormCreate(Sender: TObject);
+procedure TFormFastMMUsageTracker.FormCreate(Sender: TObject);
 var
   LR_SystemInfo: TSystemInfo;
 begin
@@ -308,12 +330,12 @@ begin
   end;
 end;
 
-procedure TfFastMMUsageTracker.FormClose(Sender: TObject; var Action: TCloseAction);
+procedure TFormFastMMUsageTracker.FormClose(Sender: TObject; var Action: TCloseAction);
 begin
   Action := caFree;
 end;
 
-procedure TfFastMMUsageTracker.SortGrid(grid: TStringgrid; PB_Nummeric: Boolean; byColumn: Integer; ascending: Boolean);
+procedure TFormFastMMUsageTracker.SortGrid(grid: TStringgrid; PB_Nummeric: Boolean; byColumn: Integer; ascending: Boolean);
 
   function CompareNumeric(const S1, S2: string): Integer;
   var
@@ -432,7 +454,7 @@ begin
 end;
 
 
-procedure TfFastMMUsageTracker.HeaderClicked(AGrid: TStringgrid; const ACell: TGridCoord);
+procedure TFormFastMMUsageTracker.HeaderClicked(AGrid: TStringgrid; const ACell: TGridCoord);
 var
   i: Integer;
   LNumericSort: Boolean;
@@ -468,23 +490,18 @@ begin
   TLocalStringGrid(AGrid).InvalidateCell(ACell.x, ACell.y);
 end;
 
-procedure TfFastMMUsageTracker.UpdateGraphMetrics;
+procedure TFormFastMMUsageTracker.UpdateGraphMetrics;
+var
+  Dummy: Boolean;
 begin
-  if ChkSmallGraph.Checked then
-  begin
-    dgMemoryMap.DefaultColWidth := 4;
-    dgMemoryMap.ColCount := 128;
-  end
-  else
-  begin
-    dgMemoryMap.DefaultColWidth := 8;
-    dgMemoryMap.ColCount := 64;
-  end;
+  dgMemoryMap.DefaultColWidth := 6;
+  dgMemoryMap.ColCount := 128;
   dgMemoryMap.DefaultRowHeight := dgMemoryMap.DefaultColWidth;
   dgMemoryMap.RowCount := AddressSpacePageCount div dgMemoryMap.ColCount;
+  dgMemoryMapSelectCell(Self,dgMemoryMap.Col,dgMemoryMap.Row,Dummy);
 end;
 
-procedure TfFastMMUsageTracker.RefreshSnapShot;
+procedure TFormFastMMUsageTracker.RefreshSnapShot;
 var
   LP_FreeVMList: TList;
   LU_MEM_FREE: NativeUInt;
@@ -506,7 +523,7 @@ var
       if AMemoryMap[LInd] = csExSysAllocated then
       begin
         {Get all the reserved memory blocks and Windows allocated memory blocks, etc.}
-        VirtualQuery(Pointer(LInd * 65536), LMBI, SizeOf(LMBI));
+        VirtualQuery(Pointer(Cardinal(LInd) * 65536), LMBI, SizeOf(LMBI));
         if LMBI.State = MEM_COMMIT then
         begin
           if (GetModuleFileName(DWord(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
@@ -852,8 +869,6 @@ var
     end;
   end;
 
-var
-  Save_Cursor: TCursor;
 begin
   if SizeOf(TMemoryMap) <> SizeOf(TMemoryMapEx) then
   begin
@@ -873,9 +888,6 @@ begin
   LPrevTotalAllocated := 0;
   LPrevTotalReserved := 0;
 
-  // Set hourglass cursor
-  Save_Cursor := Screen.Cursor;
-  Screen.Cursor := crHourGlass;
   LP_FreeVMList := TList.Create;
   try
     // retrieve FastMM4 info
@@ -901,11 +913,10 @@ begin
     FPrevMemoryManagerState := FMemoryManagerState;
   finally
     FreeAndNil(LP_FreeVMList);
-    Screen.Cursor := Save_Cursor;
   end;
 end;
 
-procedure TfFastMMUsageTracker.sgBlockStatisticsDrawCell(Sender: TObject;
+procedure TFormFastMMUsageTracker.sgBlockStatisticsDrawCell(Sender: TObject;
   ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
   d: integer;
@@ -917,10 +928,9 @@ begin
   if d <> 0 then
   begin
     LOldColour := sgBlockStatistics.Canvas.Brush.Color;
-    if d < 0 then
-      LColour := clLime
-    else
-      LColour := clRed;
+    if d < 0
+      then LColour := $DDFFDD
+      else LColour := $DDDDFF;
     sgBlockStatistics.Canvas.Brush.Color := LColour;
     sgBlockStatistics.Canvas.Font.Color := clWindowText;
     s := sgBlockStatistics.Cells[ACol, ARow];
@@ -931,7 +941,7 @@ begin
   end;
 end;
 
-procedure TfFastMMUsageTracker.tTimerTimer(Sender: TObject);
+procedure TFormFastMMUsageTracker.tTimerTimer(Sender: TObject);
 begin
   tTimer.Enabled := False;
   try
@@ -941,148 +951,58 @@ begin
   end;
 end;
 
-procedure TfFastMMUsageTracker.bCloseClick(Sender: TObject);
+procedure TFormFastMMUsageTracker.bCloseClick(Sender: TObject);
 begin
   Close;
 end;
 
-procedure TfFastMMUsageTracker.dgMemoryMapDrawCell(Sender: TObject; ACol,
+procedure TFormFastMMUsageTracker.dgMemoryMapDrawCell(Sender: TObject; ACol,
   ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
   LChunkIndex: integer;
-  LChunkColour: TColor;
 begin
   {Get the chunk index}
   LChunkIndex := ARow * dgMemoryMap.ColCount + ACol;
 
-  {Get the correct colour}
-  case FMemoryMapEx[LChunkIndex] of
-
-    csExAllocated:
-      begin
-        LChunkColour := $9090FF;
-      end;
-
-    csExReserved:
-      begin
-        LChunkColour := $90F090;
-      end;
-
-    csExSysAllocated:
-      begin
-        LChunkColour := $707070;
-      end;
-
-    csExSysExe:
-      begin
-        LChunkColour := clRed;
-      end;
-
-    csExSysDLL:
-      begin
-        LChunkColour := clBlue;
-      end;
-
-    csExSysReserved:
-      begin
-        LChunkColour := $C0C0C0;
-      end
-
-  else
-    begin
-      {ExUnallocated}
-      LChunkColour := $FFFFFF;
-    end;
-  end;
-
   {Draw the chunk background}
-  dgMemoryMap.Canvas.Brush.Color := LChunkColour;
+  dgMemoryMap.Canvas.Brush.Color := TChunkColor[FMemoryMapEx[LChunkIndex]];
 
-  if State = [] then
-    dgMemoryMap.Canvas.FillRect(Rect)
-  else
-    dgMemoryMap.Canvas.Rectangle(Rect);
+  if State = []
+    then dgMemoryMap.Canvas.FillRect(Rect)
+    else dgMemoryMap.Canvas.Rectangle(Rect);
 end;
 
-procedure TfFastMMUsageTracker.dgMemoryMapSelectCell(Sender: TObject; ACol,
+procedure TFormFastMMUsageTracker.dgMemoryMapSelectCell(Sender: TObject; ACol,
   ARow: Integer; var CanSelect: Boolean);
 var
   LChunkIndex: Cardinal;
   LMBI: TMemoryBasicInformation;
-  LA_Char: array[0..MAX_PATH] of char;
+  FileName: array[0..MAX_PATH] of Char;
 begin
-  eDLLName.Text := '';
   LChunkIndex := ARow * dgMemoryMap.ColCount + ACol;
-  eAddress.Text := Format('$%0.8x', [LChunkIndex shl 16]);
+  StatusBar.SimpleText := Format('$%0.8x: %s',[LChunkIndex shl 16,TChunkCaption[FMemoryMapEx[LChunkIndex]]]);
 
-  case FMemoryMapEx[LChunkIndex] of
-
-    csExAllocated:
-      begin
-        eState.Text := 'FastMM Allocated';
-      end;
-
-    csExReserved:
-      begin
-        eState.Text := 'FastMM Reserved';
-      end;
-
-    csExSysAllocated:
-      begin
-        eState.Text := 'System Allocated';
-      end;
-
-    csExSysExe:
-      begin
-        eState.Text := 'System Exe';
-        VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
-        if (GetModuleFileName(dword(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
-        begin
-          eDLLName.Text := LA_Char;
-        end;
-      end;
-
-    csExSysDLL:
-      begin
-        eState.Text := 'System/User DLL';
-        VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
-        if (GetModuleFileName(dword(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
-        begin
-          eDLLName.Text := LA_Char;
-        end;
-      end;
-
-    csExSysReserved:
-      begin
-        eState.Text := 'System Reserved';
-      end
-
-  else
+  if FMemoryMapEx[LChunkIndex] in [csExSysExe,csExSysDLL] then
+  begin
+    VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
+    if (GetModuleFileName(dword(LMBI.AllocationBase), FileName, MAX_PATH) <> 0) then
     begin
-      {ExUnallocated}
-      eState.Text := 'Free';
+      StatusBar.SimpleText := StatusBar.SimpleText+' ('+FileName+')';
     end;
   end;
 end;
 
-procedure TfFastMMUsageTracker.bUpdateClick(Sender: TObject);
+procedure TFormFastMMUsageTracker.bUpdateClick(Sender: TObject);
 begin
   RefreshSnapShot;
 end;
 
-procedure TfFastMMUsageTracker.ChkAutoUpdateClick(Sender: TObject);
+procedure TFormFastMMUsageTracker.ChkAutoUpdateClick(Sender: TObject);
 begin
   tTimer.Enabled := ChkAutoUpdate.Checked;
 end;
 
-procedure TfFastMMUsageTracker.ChkSmallGraphClick(Sender: TObject);
-begin
-  UpdateGraphMetrics;
-  dgMemoryMap.Invalidate;
-  dgMemoryMap.SetFocus;
-end;
-
-procedure TfFastMMUsageTracker.sgVMDumpMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+procedure TFormFastMMUsageTracker.sgVMDumpMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 begin
   if (Button = mbLeft) and (Shift = [ssLeft]) then
   begin
@@ -1095,7 +1015,7 @@ begin
   end;
 end;
 
-procedure TfFastMMUsageTracker.sgVMDumpMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+procedure TFormFastMMUsageTracker.sgVMDumpMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   p: TGridCoord;
   LGrid: TStringgrid;
@@ -1115,7 +1035,7 @@ begin
   OR_VMDumpDownCell.Y := 0;
 end;
 
-procedure TfFastMMUsageTracker.sgVMDumpDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
+procedure TFormFastMMUsageTracker.sgVMDumpDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
   LGrid: TStringgrid;
   LMarker: Char;
@@ -1142,17 +1062,17 @@ begin
   end;
 end;
 
-procedure TfFastMMUsageTracker.siMM4AllocationCopyAlltoClipboardClick(Sender: TObject);
+procedure TFormFastMMUsageTracker.siMM4AllocationCopyAlltoClipboardClick(Sender: TObject);
 begin
   CopyGridContentsToClipBoard(sgBlockStatistics);
 end;
 
-procedure TfFastMMUsageTracker.miVMDumpCopyAlltoClipboardClick(Sender: TObject);
+procedure TFormFastMMUsageTracker.miVMDumpCopyAlltoClipboardClick(Sender: TObject);
 begin
   CopyGridContentsToClipBoard(sgVMDump);
 end;
 
-procedure TfFastMMUsageTracker.miGeneralInformationCopyAlltoClipboardClick(Sender: TObject);
+procedure TFormFastMMUsageTracker.miGeneralInformationCopyAlltoClipboardClick(Sender: TObject);
 begin
   with mVMStatistics do
   begin

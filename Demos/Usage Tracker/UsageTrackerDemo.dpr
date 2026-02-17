@@ -3,7 +3,7 @@ program UsageTrackerDemo;
 uses
   FastMM4,
   Forms,
-  DemoForm in 'DemoForm.pas' {fDemo};
+  DemoForm in 'DemoForm.pas' {FormDemo};
 
 {$R *.res}
 
@@ -12,6 +12,6 @@ uses
 
 begin
   Application.Initialize;
-  Application.CreateForm(TfDemo, fDemo);
+  Application.CreateForm(TFormDemo, FormDemo);
   Application.Run;
 end.

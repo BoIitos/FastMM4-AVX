@@ -55,7 +55,7 @@ interface
 
 uses
 
-  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms, PsAPI,
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms, PsAPI, Math,
   Dialogs, StdCtrls, ExtCtrls, Grids, Buttons, ComCtrls, Menus, Clipbrd, FastMM4;
 
 type
@@ -141,6 +141,7 @@ type
     procedure siMM4AllocationCopyAlltoClipboardClick(Sender: TObject);
     procedure sgBlockStatisticsDrawCell(Sender: TObject; ACol,
       ARow: Integer; Rect: TRect; State: TGridDrawState);
+    procedure FormResize(Sender: TObject);
   private
     {The current and previous memory manager states}
     FMemoryManagerState, FPrevMemoryManagerState: TMemoryManagerState;
@@ -330,6 +331,11 @@ begin
   end;
 end;
 
+procedure TFormFastMMUsageTracker.FormResize(Sender: TObject);
+begin
+  UpdateGraphMetrics;
+end;
+
 procedure TFormFastMMUsageTracker.FormClose(Sender: TObject; var Action: TCloseAction);
 begin
   Action := caFree;
@@ -494,10 +500,10 @@ procedure TFormFastMMUsageTracker.UpdateGraphMetrics;
 var
   Dummy: Boolean;
 begin
-  dgMemoryMap.DefaultColWidth := 6;
-  dgMemoryMap.ColCount := 128;
+  dgMemoryMap.DefaultColWidth := Max(1,(Trunc(Sqrt((dgMemoryMap.ClientWidth*dgMemoryMap.ClientHeight) div AddressSpacePageCount))));
   dgMemoryMap.DefaultRowHeight := dgMemoryMap.DefaultColWidth;
-  dgMemoryMap.RowCount := AddressSpacePageCount div dgMemoryMap.ColCount;
+  dgMemoryMap.ColCount := dgMemoryMap.ClientWidth div dgMemoryMap.DefaultColWidth;
+  dgMemoryMap.RowCount := Round(AddressSpacePageCount/dgMemoryMap.ColCount);
   dgMemoryMapSelectCell(Self,dgMemoryMap.Col,dgMemoryMap.Row,Dummy);
 end;
 
@@ -965,7 +971,9 @@ begin
   LChunkIndex := ARow * dgMemoryMap.ColCount + ACol;
 
   {Draw the chunk background}
-  dgMemoryMap.Canvas.Brush.Color := TChunkColor[FMemoryMapEx[LChunkIndex]];
+  if LChunkIndex<AddressSpacePageCount
+    then dgMemoryMap.Canvas.Brush.Color := TChunkColor[FMemoryMapEx[LChunkIndex]]
+    else dgMemoryMap.Canvas.Brush.Color := TChunkColor[csExUnallocated];
 
   if State = []
     then dgMemoryMap.Canvas.FillRect(Rect)
@@ -980,16 +988,18 @@ var
   FileName: array[0..MAX_PATH] of Char;
 begin
   LChunkIndex := ARow * dgMemoryMap.ColCount + ACol;
-  StatusBar.SimpleText := Format('$%0.8x: %s',[LChunkIndex shl 16,TChunkCaption[FMemoryMapEx[LChunkIndex]]]);
-
-  if FMemoryMapEx[LChunkIndex] in [csExSysExe,csExSysDLL] then
+  if LChunkIndex<AddressSpacePageCount then
   begin
-    VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
-    if (GetModuleFileName(dword(LMBI.AllocationBase), FileName, MAX_PATH) <> 0) then
+    StatusBar.SimpleText := Format('$%0.8x: %s',[LChunkIndex shl 16,TChunkCaption[FMemoryMapEx[LChunkIndex]]]);
+    if FMemoryMapEx[LChunkIndex] in [csExSysExe,csExSysDLL] then
     begin
-      StatusBar.SimpleText := StatusBar.SimpleText+' ('+FileName+')';
+      VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
+      if (GetModuleFileName(dword(LMBI.AllocationBase), FileName, MAX_PATH) <> 0) then
+      begin
+        StatusBar.SimpleText := StatusBar.SimpleText+' ('+FileName+')';
+      end;
     end;
-  end;
+  end else StatusBar.SimpleText := '';
 end;
 
 procedure TFormFastMMUsageTracker.bUpdateClick(Sender: TObject);

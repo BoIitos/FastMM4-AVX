@@ -13,6 +13,7 @@ object FormFastMMUsageTracker: TFormFastMMUsageTracker
   Position = poScreenCenter
   OnClose = FormClose
   OnCreate = FormCreate
+  OnResize = FormResize
   TextHeight = 13
   object pcUsageTracker: TPageControl
     Left = 0

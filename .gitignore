@@ -42,9 +42,8 @@ FastMM4Messages.ppu
 FastMM4Messages.o
 *.ppu
 
-# NASM object files
-FastMM4_AVX512.obj
-FastMM4_AVX512_Linux.o
+# NASM
+nasm.exe
 
 # Test build artifacts
 /Tests/Simple/SimpleTest.dproj

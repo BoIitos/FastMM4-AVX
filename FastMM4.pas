@@ -1484,7 +1484,6 @@ interface
   {$undef LogErrorsToFile}
   {$undef CatchUseOfFreedInterfaces}
   {$undef RawStackTraces}
-  {$undef AlwaysAllocateTopDown}
 {$ENDIF}
 
 {Set defines for security options}

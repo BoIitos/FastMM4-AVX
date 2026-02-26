@@ -18589,15 +18589,15 @@ begin
         if (LMediumBlockHeader and IsSmallBlockPoolInUseFlag) <> 0
           then ChunkStatus:=csAllocatedSmall
           else ChunkStatus:=csAllocatedMedium;
-      end;
-      {Get the block size}
-      LMediumBlockSize := LMediumBlockHeader and DropMediumAndLargeFlagsMask;
-      LChunkIndex := NativeUInt(LPMediumBlock) shr 16;
-      for LIndNUI := 0 to (LMediumBlockSize - 1) shr 16 do
-      begin
-        if (LChunkIndex + LIndNUI) > High(AMemoryMap) then
-          Break;
-        AMemoryMap[LChunkIndex + LIndNUI] := ChunkStatus;
+        {Get the block size}
+        LMediumBlockSize := LMediumBlockHeader and DropMediumAndLargeFlagsMask;
+        LChunkIndex := NativeUInt(LPMediumBlock) shr 16;
+        for LIndNUI := 0 to (LMediumBlockSize - 1) shr 16 do
+        begin
+          if (LChunkIndex + LIndNUI) > High(AMemoryMap) then
+            Break;
+          AMemoryMap[LChunkIndex + LIndNUI] := ChunkStatus;
+        end;
       end;
       {Next medium block}
       LPMediumBlock := NextMediumBlock(LPMediumBlock);

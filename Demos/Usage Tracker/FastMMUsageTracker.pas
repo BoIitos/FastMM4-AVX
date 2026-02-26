@@ -756,7 +756,7 @@ var
         GlobalMemoryStatus(LR_GlobalMemoryStatus);
       end;
 
-      LP_FreeVMList.Sort(@LocSort);
+      LP_FreeVMList.Sort(LocSort);
 
       GetProcessWorkingSetSize(GetCurrentProcess, LU_MinQuota, LU_MaxQuota);
       GetSystemInfo(LR_SystemInfo);

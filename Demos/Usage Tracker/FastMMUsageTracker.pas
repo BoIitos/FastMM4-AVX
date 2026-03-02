@@ -45,7 +45,8 @@ Change log:
 
   Version 3.00 (15 February 2026):
   - Window is now resizeable
-  - The VM graph can now distinguish between small, medium and large blocks
+  - VM graph distinguishes between small, medium and large blocks
+  - VM graph now auto-scales
   - Enhanced readability
 *)
 
@@ -124,29 +125,23 @@ type
     procedure tTimerTimer(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure bCloseClick(Sender: TObject);
-    procedure dgMemoryMapDrawCell(Sender: TObject; ACol, ARow: Integer;
-      Rect: TRect; State: TGridDrawState);
-    procedure dgMemoryMapSelectCell(Sender: TObject; ACol, ARow: Integer;
-      var CanSelect: Boolean);
+    procedure dgMemoryMapDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
+    procedure dgMemoryMapSelectCell(Sender: TObject; ACol, ARow: Integer; var CanSelect: Boolean);
     procedure bUpdateClick(Sender: TObject);
     procedure ChkAutoUpdateClick(Sender: TObject);
-    procedure sgVMDumpMouseDown(Sender: TObject; Button: TMouseButton;
-      Shift: TShiftState; X, Y: Integer);
-    procedure sgVMDumpMouseUp(Sender: TObject; Button: TMouseButton;
-      Shift: TShiftState; X, Y: Integer);
-    procedure sgVMDumpDrawCell(Sender: TObject; ACol, ARow: Integer;
-      Rect: TRect; State: TGridDrawState);
+    procedure sgVMDumpMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    procedure sgVMDumpMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    procedure sgVMDumpDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
     procedure miVMDumpCopyAlltoClipboardClick(Sender: TObject);
     procedure miGeneralInformationCopyAlltoClipboardClick(Sender: TObject);
     procedure siMM4AllocationCopyAlltoClipboardClick(Sender: TObject);
-    procedure sgBlockStatisticsDrawCell(Sender: TObject; ACol,
-      ARow: Integer; Rect: TRect; State: TGridDrawState);
+    procedure sgBlockStatisticsDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
     procedure FormResize(Sender: TObject);
   private
     {The current and previous memory manager states}
     FMemoryManagerState, FPrevMemoryManagerState: TMemoryManagerState;
     FMemoryMapEx: TMemoryMapEx;
-    AddressSpacePageCount: Integer;
+    AddressSpacePageCount: Cardinal;
     OR_VMDumpDownCell: TGridCoord;
     procedure HeaderClicked(AGrid: TStringgrid; const ACell: TGridCoord);
     procedure SortGrid(grid: TStringgrid; PB_Nummeric: Boolean; byColumn: Integer; ascending: Boolean);
@@ -306,10 +301,9 @@ begin
   pcUsageTracker.ActivePage := tsAllocation;
   GetSystemInfo(LR_SystemInfo);
   {Get the number of address space pages}
-  if (Cardinal(LR_SystemInfo.lpMaximumApplicationAddress) and $80000000) = 0 then
-    AddressSpacePageCount := 32768
-  else
-    AddressSpacePageCount := 65536;
+  if (Cardinal(LR_SystemInfo.lpMaximumApplicationAddress) and $80000000) = 0
+    then AddressSpacePageCount := 32768
+    else AddressSpacePageCount := 65536;
   {Update the graph metrics}
   UpdateGraphMetrics;
   {Set up the StringGrid columns}
@@ -446,10 +440,9 @@ begin
   Screen.Cursor := crHourglass;
   Grid.Perform(WM_SETREDRAW, 0, 0);
   try
-    if PB_Nummeric then
-      QuickSortNummeric(Grid.FixedRows, Grid.Rowcount - 1)
-    else
-      QuickSortString(Grid.FixedRows, Grid.Rowcount - 1);
+    if PB_Nummeric
+      then QuickSortNummeric(Grid.FixedRows, Grid.Rowcount - 1)
+      else QuickSortString(Grid.FixedRows, Grid.Rowcount - 1);
     if not Ascending then
       InvertGrid;
   finally
@@ -479,10 +472,9 @@ begin
   end;
   // Sort grid on new column. If grid is currently sorted ascending on this
   // column we invert the sort direction, otherwise we sort it ascending.
-  if ACell.X = 1 then
-    LNumericSort := True
-  else
-    LNumericSort := False;
+  if ACell.X = 1
+    then LNumericSort := True
+    else LNumericSort := False;
   if Integer(AGrid.Objects[ACell.x, ACell.y]) = 1 then
   begin
     SortGrid(AGrid, LNumericSort, ACell.x, False);
@@ -500,7 +492,7 @@ procedure TFormFastMMUsageTracker.UpdateGraphMetrics;
 var
   Dummy: Boolean;
 begin
-  dgMemoryMap.DefaultColWidth := Max(1,(Trunc(Sqrt((dgMemoryMap.ClientWidth*dgMemoryMap.ClientHeight) div AddressSpacePageCount))));
+  dgMemoryMap.DefaultColWidth := Max(1,(Trunc(Sqrt(Cardinal((dgMemoryMap.ClientWidth*dgMemoryMap.ClientHeight)) div AddressSpacePageCount))));
   dgMemoryMap.DefaultRowHeight := dgMemoryMap.DefaultColWidth;
   dgMemoryMap.ColCount := dgMemoryMap.ClientWidth div dgMemoryMap.DefaultColWidth;
   dgMemoryMap.RowCount := Round(AddressSpacePageCount/dgMemoryMap.ColCount);
@@ -510,15 +502,19 @@ end;
 procedure TFormFastMMUsageTracker.RefreshSnapShot;
 var
   LP_FreeVMList: TList;
+  LU_MEM_DLL: NativeUInt;
+  LU_MEM_EXE: NativeUInt;
   LU_MEM_FREE: NativeUInt;
   LU_MEM_COMMIT: NativeUInt;
   LU_MEM_RESERVE: NativeUInt;
   LAllocatedSize, LTotalBlocks, LTotalAllocated, LTotalReserved,
-    LPrevAllocatedSize, LPrevTotalBlocks, LPrevTotalAllocated, LPrevTotalReserved: NativeUInt;
+  LTotalSmallBlocks, LTotalSmallAllocated, LTotalSmallReserved,
+  LPrevTotalSmallBlocks, LPrevTotalSmallAllocated, LPrevTotalSmallReserved,
+  LPrevAllocatedSize, LPrevTotalBlocks, LPrevTotalAllocated, LPrevTotalReserved: NativeUInt;
 
   procedure UpdateVMGraph(var AMemoryMap: TMemoryMapEx);
   var
-    LInd, LIndTop, I1: Cardinal;
+    LInd, LIndTop, I1: NativeUInt;
     LChunkState: TChunkStatusEx;
     LMBI: TMemoryBasicInformation;
     LA_Char: array[0..MAX_PATH] of Char;
@@ -529,32 +525,23 @@ var
       if AMemoryMap[LInd] = csExSysAllocated then
       begin
         {Get all the reserved memory blocks and Windows allocated memory blocks, etc.}
-        VirtualQuery(Pointer(Cardinal(LInd) * 65536), LMBI, SizeOf(LMBI));
+        VirtualQuery(Pointer(NativeUInt(LInd) * 65536), LMBI, SizeOf(LMBI));
         if LMBI.State = MEM_COMMIT then
         begin
           if (GetModuleFileName(DWord(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
           begin
-            if DWord(LMBI.AllocationBase) = SysInit.HInstance then
-              LChunkState := csExSysExe
-            else
-              LChunkState := csExSysDLL;
-          end
-          else
-          begin
-            LChunkState := csExSysAllocated;
-          end;
+            if DWord(LMBI.AllocationBase) = SysInit.HInstance
+              then LChunkState := csExSysExe
+              else LChunkState := csExSysDLL;
+          end else LChunkState := csExSysAllocated;
           if LMBI.RegionSize > 65536 then
           begin
-            LIndTop := (Cardinal(LMBI.BaseAddress) + Cardinal(LMBI.RegionSize)) div 65536;
+            LIndTop := (NativeUInt(LMBI.BaseAddress) + LMBI.RegionSize) div 65536;
             // Fill up multiple tables
             for I1 := LInd to LIndTop do
               AMemoryMap[I1] := LChunkState;
             LInd := LIndTop;
-          end
-          else
-          begin
-            AMemoryMap[LInd] := LChunkState;
-          end;
+          end else AMemoryMap[LInd] := LChunkState;
         end
       end;
       Inc(LInd);
@@ -583,17 +570,22 @@ var
 
           MEM_Commit:
             begin
-              LU_MEM_COMMIT := LU_MEM_COMMIT + LR_Info.RegionSize;
               if (GetModuleFileName(dword(LR_Info.AllocationBase), LA_Char, MAX_PATH) <> 0) then
               begin
                 if DWord(LR_Info.AllocationBase) = SysInit.HInstance then
+                begin
+                  LU_MEM_EXE := LU_MEM_EXE + LR_Info.RegionSize;
                   Cells[2, LI_I] := 'Exe'
-                else
+                end else
+                begin
+                  LU_MEM_DLL := LU_MEM_DLL + LR_Info.RegionSize;
                   Cells[2, LI_I] := 'DLL';
+                end;
                 Cells[4, LI_I] := ExtractFileName(LA_Char);
               end
               else
               begin
+                LU_MEM_COMMIT := LU_MEM_COMMIT + LR_Info.RegionSize;
                 Cells[4, LI_I] := '';
                 Cells[2, LI_I] := 'Commited';
               end;
@@ -630,7 +622,7 @@ var
     LU_StateLength: Cardinal;
     LPrevSBState, LSBState: ^TSmallBlockTypeState;
 
-    procedure UpdateBlockStatistics(c, r, current, prev: Integer);
+    procedure UpdateBlockStatistics(c, r, current, prev: NativeInt);
     var
       s : string;
     begin
@@ -646,10 +638,11 @@ var
   begin
     LU_StateLength := Length(FMemoryManagerState.SmallBlockTypeStates);
     {Set up the row count}
-    sgBlockStatistics.RowCount := LU_StateLength + 4;
-    sgBlockStatistics.Cells[0, LU_StateLength + 1] := 'Medium Blocks';
-    sgBlockStatistics.Cells[0, LU_StateLength + 2] := 'Large Blocks';
-    sgBlockStatistics.Cells[0, LU_StateLength + 3] := 'Overall';
+    sgBlockStatistics.RowCount := LU_StateLength + 5;
+    sgBlockStatistics.Cells[0, LU_StateLength + 1] := 'Small Blocks';
+    sgBlockStatistics.Cells[0, LU_StateLength + 2] := 'Medium Blocks';
+    sgBlockStatistics.Cells[0, LU_StateLength + 3] := 'Large Blocks';
+    sgBlockStatistics.Cells[0, LU_StateLength + 4] := 'Overall';
     for LInd := 0 to High(FMemoryManagerState.SmallBlockTypeStates) do
     begin
       sgBlockStatistics.Cells[0, LInd + 1] :=
@@ -664,21 +657,33 @@ var
       UpdateBlockStatistics(1, LInd + 1, LSBState.AllocatedBlockCount, LPrevSBState.AllocatedBlockCount);
       Inc(LTotalBlocks, LSBState.AllocatedBlockCount);
       Inc(LPrevTotalBlocks, LPrevSBState.AllocatedBlockCount);
+      Inc(LTotalSmallBlocks, LSBState.AllocatedBlockCount);
+      Inc(LPrevTotalSmallBlocks, LPrevSBState.AllocatedBlockCount);
       LAllocatedSize := LSBState.AllocatedBlockCount * LSBState.UseableBlockSize;
       LPrevAllocatedSize := LPrevSBState.AllocatedBlockCount * LPrevSBState.UseableBlockSize;
       UpdateBlockStatistics(2, LInd + 1, LAllocatedSize, LPrevAllocatedSize);
       Inc(LTotalAllocated, LAllocatedSize);
       Inc(LPrevTotalAllocated, LPrevAllocatedSize);
+      Inc(LTotalSmallAllocated, LAllocatedSize);
+      Inc(LPrevTotalSmallAllocated, LPrevAllocatedSize);
       UpdateBlockStatistics(3, LInd + 1, LSBState.ReservedAddressSpace, LPrevSBState.ReservedAddressSpace);
       Inc(LTotalReserved, LSBState.ReservedAddressSpace);
       Inc(LPrevTotalReserved, LPrevSBState.ReservedAddressSpace);
-      if LSBState.ReservedAddressSpace > 0 then
-        sgBlockStatistics.Cells[4, LInd + 1] := FormatFloat('0.##%', LAllocatedSize / LSBState.ReservedAddressSpace * 100)
-      else
-        sgBlockStatistics.Cells[4, LInd + 1] := 'N/A';
+      Inc(LTotalSmallReserved, LSBState.ReservedAddressSpace);
+      Inc(LPrevTotalSmallReserved, LPrevSBState.ReservedAddressSpace);
+      if LSBState.ReservedAddressSpace > 0
+        then sgBlockStatistics.Cells[4, LInd + 1] := FormatFloat('0.##%', LAllocatedSize / LSBState.ReservedAddressSpace * 100)
+        else sgBlockStatistics.Cells[4, LInd + 1] := 'N/A';
     end;
-    {-----------Medium blocks---------}
     LInd := length(FMemoryManagerState.SmallBlockTypeStates) + 1;
+    UpdateBlockStatistics(1, LInd, LTotalSmallBlocks, LPrevTotalSmallBlocks);
+    UpdateBlockStatistics(2, LInd, LTotalSmallAllocated, LPrevTotalSmallAllocated);
+    UpdateBlockStatistics(3, LInd, LTotalSmallReserved, LPrevTotalSmallReserved);
+    if LTotalSmallReserved > 0
+      then sgBlockStatistics.Cells[4, LInd] := FormatFloat('0.##%', LTotalSmallAllocated / LTotalSmallReserved * 100)
+      else sgBlockStatistics.Cells[4, LInd] := 'N/A';
+    {-----------Medium blocks---------}
+    LInd := length(FMemoryManagerState.SmallBlockTypeStates) + 2;
     UpdateBlockStatistics(1, LInd, FMemoryManagerState.AllocatedMediumBlockCount, FPrevMemoryManagerState.AllocatedMediumBlockCount);
     Inc(LTotalBlocks, FMemoryManagerState.AllocatedMediumBlockCount);
     Inc(LPrevTotalBlocks, FPrevMemoryManagerState.AllocatedMediumBlockCount);
@@ -688,12 +693,11 @@ var
     UpdateBlockStatistics(3, LInd, FMemoryManagerState.ReservedMediumBlockAddressSpace, FPrevMemoryManagerState.ReservedMediumBlockAddressSpace);
     Inc(LTotalReserved, FMemoryManagerState.ReservedMediumBlockAddressSpace);
     Inc(LPrevTotalReserved, FPrevMemoryManagerState.ReservedMediumBlockAddressSpace);
-    if FMemoryManagerState.ReservedMediumBlockAddressSpace > 0 then
-      sgBlockStatistics.Cells[4, LInd] := FormatFloat('0.##%', FMemoryManagerState.TotalAllocatedMediumBlockSize / FMemoryManagerState.ReservedMediumBlockAddressSpace * 100)
-    else
-      sgBlockStatistics.Cells[4, LInd] := 'N/A';
+    if FMemoryManagerState.ReservedMediumBlockAddressSpace > 0
+      then sgBlockStatistics.Cells[4, LInd] := FormatFloat('0.##%', FMemoryManagerState.TotalAllocatedMediumBlockSize / FMemoryManagerState.ReservedMediumBlockAddressSpace * 100)
+      else sgBlockStatistics.Cells[4, LInd] := 'N/A';
     {----------Large blocks----------}
-    LInd := Length(FMemoryManagerState.SmallBlockTypeStates) + 2;
+    LInd := Length(FMemoryManagerState.SmallBlockTypeStates) + 3;
     UpdateBlockStatistics(1, LInd, FMemoryManagerState.AllocatedLargeBlockCount, FPrevMemoryManagerState.AllocatedLargeBlockCount);
     Inc(LTotalBlocks, FMemoryManagerState.AllocatedLargeBlockCount);
     Inc(LPrevTotalBlocks, FPrevMemoryManagerState.AllocatedLargeBlockCount);
@@ -703,19 +707,17 @@ var
     UpdateBlockStatistics(3, LInd, FMemoryManagerState.ReservedLargeBlockAddressSpace, FPrevMemoryManagerState.ReservedLargeBlockAddressSpace);
     Inc(LTotalReserved, FMemoryManagerState.ReservedLargeBlockAddressSpace);
     Inc(LPrevTotalReserved, FPrevMemoryManagerState.ReservedLargeBlockAddressSpace);
-    if FMemoryManagerState.ReservedLargeBlockAddressSpace > 0 then
-      sgBlockStatistics.Cells[4, LInd] := FormatFloat('0.##%', FMemoryManagerState.TotalAllocatedLargeBlockSize / FMemoryManagerState.ReservedLargeBlockAddressSpace * 100)
-    else
-      sgBlockStatistics.Cells[4, LInd] := 'N/A';
+    if FMemoryManagerState.ReservedLargeBlockAddressSpace > 0
+      then sgBlockStatistics.Cells[4, LInd] := FormatFloat('0.##%', FMemoryManagerState.TotalAllocatedLargeBlockSize / FMemoryManagerState.ReservedLargeBlockAddressSpace * 100)
+      else sgBlockStatistics.Cells[4, LInd] := 'N/A';
     {-----------Overall--------------}
-    LInd := Length(FMemoryManagerState.SmallBlockTypeStates) + 3;
+    LInd := Length(FMemoryManagerState.SmallBlockTypeStates) + 4;
     UpdateBlockStatistics(1, Lind, LTotalBlocks, LPrevTotalBlocks);
     UpdateBlockStatistics(2, Lind, LTotalAllocated, LPrevTotalAllocated);
     UpdateBlockStatistics(3, Lind, LTotalReserved, LPrevTotalReserved);
-    if LTotalReserved > 0 then
-      sgBlockStatistics.Cells[4, LInd] := FormatFloat('0.##%', LTotalAllocated / LTotalReserved * 100)
-    else
-      sgBlockStatistics.Cells[4, LInd] := 'N/A';
+    if LTotalReserved > 0
+      then sgBlockStatistics.Cells[4, LInd] := FormatFloat('0.##%', LTotalAllocated / LTotalReserved * 100)
+      else sgBlockStatistics.Cells[4, LInd] := 'N/A';
   end;
 
   procedure UpdateStatisticsData;
@@ -732,7 +734,9 @@ var
     LU_MaxQuota: {$if CompilerVersion >= 23}NativeUInt{$else}Cardinal{$ifend};
     LI_I: Integer;
     LI_Max: Integer;
+    MemoPosition: Integer;
   begin
+    MemoPosition := mVMStatistics.Perform(EM_GETFIRSTVISIBLELINE, 0, 0);
     mVMStatistics.Lines.BeginUpdate;
     try
       mVMStatistics.Clear;
@@ -763,11 +767,11 @@ var
 
       with mVMStatistics.Lines do
       begin
-        Add('System Info:');
-        Add('------------');
+        Add('System');
+        Add('------');
 
         Add('Processor Count                 = ' + IntToStr(LR_SystemInfo.dwNumberOfProcessors));
-        Add('Allocation Granularity          = ' + IntToStr(LR_SystemInfo.dwAllocationGranularity));
+        Add('Allocation Granularity          = ' + Int64ToKStringFormatted(LR_SystemInfo.dwAllocationGranularity));
 
         if Assigned(MP_GlobalMemoryStatusEx) then
         begin
@@ -835,36 +839,40 @@ var
         end;
 
         Add('');
-        Add('Process Info: PID (' + IntToStr(GetCurrentProcessId) + ')');
-        Add('------------------------');
+        Add('Process (PID ' + IntToStr(GetCurrentProcessId) + ')');
+        Add('-------------------');
         Add('Minimum Address                 = ' + Int64ToKStringFormatted(NativeUInt(LR_SystemInfo.lpMinimumApplicationAddress)));
         Add('Maximum VM Address              = ' + Int64ToKStringFormatted(NativeUInt(LR_SystemInfo.lpMaximumApplicationAddress)));
         Add('Page Protection & Commit Size   = ' + IntToStr(LR_SystemInfo.dWPageSize));
         Add('');
-        Add('Quota info:');
-        Add('-----------');
+        Add('Quota');
+        Add('-----');
         Add('Minimum Quota                   = ' + Int64ToKStringFormatted(LU_MinQuota));
         Add('Maximum Quota                   = ' + Int64ToKStringFormatted(LU_MaxQuota));
         Add('');
-        Add('VM Info:');
-        Add('--------');
+        Add('VM');
+        Add('--');
         Add('Total Free                      = ' + Int64ToKStringFormatted(LU_MEM_FREE));
         Add('Total Reserve                   = ' + Int64ToKStringFormatted(LU_MEM_RESERVE));
+        Add('Total EXE                       = ' + Int64ToKStringFormatted(LU_MEM_EXE));
+        Add('Total DLLs                      = ' + Int64ToKStringFormatted(LU_MEM_DLL));
         Add('Total Commit                    = ' + Int64ToKStringFormatted(LU_MEM_COMMIT));
 
-        if LP_FreeVMList.Count > CI_MaxFreeBlocksList then
-          LI_Max := CI_MaxFreeBlocksList - 1
-        else
-          LI_Max := LP_FreeVMList.Count - 1;
+        if LP_FreeVMList.Count > CI_MaxFreeBlocksList
+          then LI_Max := CI_MaxFreeBlocksList - 1
+          else LI_Max := LP_FreeVMList.Count - 1;
 
+        Add('');
+        Add('Largest free blocks');
+        Add('-------------------');
         for LI_I := 0 to LI_Max do
         begin
-          Add('Largest Free Block ' + IntToStr(LI_I + 1) + '.           = ' + Int64ToKStringFormatted(NativeUInt(LP_FreeVMList.List[LI_I])));
+          Add('Block ' + IntToStr(LI_I + 1) + '                         = ' + Int64ToKStringFormatted(NativeUInt(LP_FreeVMList.List[LI_I])));
         end;
 
         Add('');
-        Add('FastMM4 Info:');
-        Add('-------------');
+        Add('FastMM4');
+        Add('-------');
         Add('Total Blocks                    = ' + Int64ToKStringFormatted(LTotalBlocks));
         Add('Total Allocated                 = ' + Int64ToKStringFormatted(LTotalAllocated));
         Add('Total Reserved                  = ' + Int64ToKStringFormatted(LTotalReserved));
@@ -872,16 +880,15 @@ var
 
     finally
       mVMStatistics.Lines.EndUpdate;
+      mVMStatistics.Perform(EM_LINESCROLL, 0, MemoPosition - mVMStatistics.Perform(EM_GETFIRSTVISIBLELINE, 0, 0));
     end;
   end;
 
 begin
-  if SizeOf(TMemoryMap) <> SizeOf(TMemoryMapEx) then
-  begin
-    Showmessage('Internal implementation error');
-    Exit;
-  end;
+  Assert(SizeOf(TMemoryMap)=SizeOf(TMemoryMapEx));
 
+  LU_MEM_DLL := 0;
+  LU_MEM_EXE := 0;
   LU_MEM_FREE := 0;
   LU_MEM_COMMIT := 0;
   LU_MEM_RESERVE := 0;
@@ -889,10 +896,16 @@ begin
   LTotalBlocks := 0;
   LTotalAllocated := 0;
   LTotalReserved := 0;
+  LTotalSmallBlocks := 0;
+  LTotalSmallAllocated := 0;
+  LTotalSmallReserved := 0;
 
   LPrevTotalBlocks := 0;
   LPrevTotalAllocated := 0;
   LPrevTotalReserved := 0;
+  LPrevTotalSmallBlocks := 0;
+  LPrevTotalSmallAllocated := 0;
+  LPrevTotalSmallReserved := 0;
 
   LP_FreeVMList := TList.Create;
   try
@@ -922,15 +935,14 @@ begin
   end;
 end;
 
-procedure TFormFastMMUsageTracker.sgBlockStatisticsDrawCell(Sender: TObject;
-  ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
+procedure TFormFastMMUsageTracker.sgBlockStatisticsDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
   d: integer;
   y: integer;
   s: string;
   LOldColour, LColour: TColor;
 begin
-  d := Integer(sgBlockStatistics.Objects[ACol, ARow]);
+  d := NativeInt(sgBlockStatistics.Objects[ACol, ARow]);
   if d <> 0 then
   begin
     LOldColour := sgBlockStatistics.Canvas.Brush.Color;
@@ -962,10 +974,9 @@ begin
   Close;
 end;
 
-procedure TFormFastMMUsageTracker.dgMemoryMapDrawCell(Sender: TObject; ACol,
-  ARow: Integer; Rect: TRect; State: TGridDrawState);
+procedure TFormFastMMUsageTracker.dgMemoryMapDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
-  LChunkIndex: integer;
+  LChunkIndex: Cardinal;
 begin
   {Get the chunk index}
   LChunkIndex := ARow * dgMemoryMap.ColCount + ACol;
@@ -980,8 +991,7 @@ begin
     else dgMemoryMap.Canvas.Rectangle(Rect);
 end;
 
-procedure TFormFastMMUsageTracker.dgMemoryMapSelectCell(Sender: TObject; ACol,
-  ARow: Integer; var CanSelect: Boolean);
+procedure TFormFastMMUsageTracker.dgMemoryMapSelectCell(Sender: TObject; ACol, ARow: Integer; var CanSelect: Boolean);
 var
   LChunkIndex: Cardinal;
   LMBI: TMemoryBasicInformation;
@@ -1056,10 +1066,9 @@ begin
   begin
     if Assigned(LGrid.Objects[aCol, aRow]) then
     begin
-      if Integer(LGrid.Objects[aCol, aRow]) > 0 then
-        LMarker := 't' // up wedge in Marlett font
-      else
-        LMarker := 'u'; // down wedge in Marlett font
+      if Integer(LGrid.Objects[aCol, aRow]) > 0
+        then LMarker := 't' // up wedge in Marlett font
+        else LMarker := 'u'; // down wedge in Marlett font
       with LGrid.canvas do
       begin
         Font.Name := 'Marlett';

@@ -57,7 +57,7 @@ interface
 uses
 
   Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms, PsAPI, Math,
-  Dialogs, StdCtrls, ExtCtrls, Grids, Buttons, ComCtrls, Menus, Clipbrd, FastMM4;
+  Dialogs, StdCtrls, ExtCtrls, Grids, Buttons, ComCtrls, Menus, Clipbrd, FastMM4Utils;
 
 type
 
@@ -910,7 +910,6 @@ begin
   LP_FreeVMList := TList.Create;
   try
     // retrieve FastMM4 info
-
     GetMemoryManagerState(FMemoryManagerState);
     GetMemoryMap(TMemoryMap(FMemoryMapEx));
 

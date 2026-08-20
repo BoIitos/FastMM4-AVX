@@ -15,13 +15,14 @@
 ; License Version 3, dated 29 June 2007 (LGPL 3, available from
 ; https://www.gnu.org/licenses/lgpl.html).
 
-; This code uses zmm26 - zmm31 registers to avoid AVX-SSE transition penalty.
-; These regsters (zmm16 - zmm31) have no non-VEX counterpart. According to the
-; advise of Agner Fog, there is no state transition and no penalty for mixing
-; zmm16 - zmm31 with non-VEX SSE code. By using these registers (zmm16 - zmm31)
-; rather than zmm0-xmm15 we save us from calling "vzeroupper".
+; This code uses the zmm26 - zmm31 registers to avoid the AVX-SSE transition
+; penalty. They belong to the zmm16 - zmm31 range, which has no non-VEX
+; counterpart: according to the advice of Agner Fog, there is no state
+; transition and no penalty for mixing zmm16 - zmm31 with non-VEX SSE code.
+; Using registers from that range rather than zmm0 - zmm15 saves the call to
+; "vzeroupper".
 ; Source:
-; https://stackoverflow.com/questions/43879935/avoiding-avx-sse-vex-transition-penalties/54587480#54587480
+; https://stackoverflow.com/a/54587480
 
 
 %define	EVEXR512N0	zmm31
@@ -263,7 +264,21 @@ MoveX32LpAvx512WithErms:
 	neg		r8
 	jns		@MoveLast8
 
-	cmp		r8, -2048	; According to the Intel Manual, rep movsb outperforms AVX copy on blocks of 2048 bytes and above
+	cmp		r8, -2048	; According to the Intel Manual, rep movsb outperforms AVX copy on blocks of 2048 bytes and above; the counter here already has the 8-byte tail removed, so this turns over at a block of 2056
+; Measurements on parts that have ERMSB but not Fast Short REP MOV put the
+; crossover where the manual does: rep movsb starts to beat other methods at
+; 256 bytes, but the clear benefit over an AVX copy only appears above 2048.
+; Both 256 and 2048 are full-block sizes as measured, while the comparison
+; above runs on a counter with the 8-byte tail already removed.
+; See https://stackoverflow.com/a/43837564/6910868
+; No source/destination distance check guards the rep movsb below, where
+; glibc, on Intel CPUs with Fast Short REP MOVSB (FSRM), and the MSVC v14.50
+; CRT, on every CPU, refuse rep movsb in memmove when a forward copy's
+; destination lies 1 to 63 bytes below the source, the close-overlap case
+; that is pathologically slow on some FSRM CPUs. FastMM needs no such check,
+; because this routine only runs a reallocation copy between two separately
+; allocated blocks, which never overlap.
+; See https://stackoverflow.com/a/79996071/6910868
 	jg		@DontDoRepMovsb
 
 	align		4

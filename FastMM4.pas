@@ -1,17 +1,18 @@
 (*
 
-FastMM4-AVX (efficient synchronization and AVX1/AVX2/AVX512/ERMS/FSRM support for FastMM4)
+FastMM4-AVX (FreePascal support, efficient synchronization, AVX1/AVX2/AVX512/ERMS/FSRM/UMWAIT for FastMM4)
  - Copyright (C) 2017-2020 Ritlabs, SRL. All rights reserved.
- - Copyright (C) 2020-2025 Maxim Masiutin. All rights reserved.
+ - Copyright (C) 2020-2026 Maxim Masiutin. All rights reserved.
 
 Written by Maxim Masiutin <maxim@masiutin.com>
 
-Version 1.0.11 (27 December 2025)
+Version 1.0.14 (16 August 2026)
 
-This is a fork of the "Fast Memory Manager" (FastMM) v4.993 by Pierre le Riche
-(see below for the original FastMM4 description)
+Supported compilers: Embarcadero Delphi, FreePascal (FPC/Lazarus).
 
-Changes in FastMM4-AVX compared to original FastMM4:
+A fork of the Fast Memory Manager (FastMM) v4.993 by Pierre le Riche.
+
+Changes in FastMM4-AVX compared to the original FastMM4:
 
  - Efficient synchronization
    - improved synchronization between the threads; proper synchronization
@@ -26,22 +27,26 @@ Changes in FastMM4-AVX compared to original FastMM4:
      iteration of the spin-wait loop; if the variable is available upon
      the normal memory load of the first step ("test"), proceed to the
      second step ("test-and-set") which is done via the bus-locking atomic
-     "xchg" instruction; however, this two-steps approach of using "test" before
-     "test-and-set" can increase the cost for the un-contended case comparing
-     to just single-step "test-and-set", this may explain why the speed benefits
+     "xchg" instruction; however, this two-step approach of using "test" before
+     "test-and-set" can increase the cost for the uncontended case compared
+     to just single-step "test-and-set"; this may explain why the speed benefits
      of the FastMM4-AVX are more pronounced when the memory manager is called
      from multiple threads in parallel, while in single-threaded use scenario
      there may be no benefit compared to the original FastMM4;
+     the memory-operand form of "xchg" locks whether or not a LOCK prefix is
+     written, so the prefix written on it here is redundant, see
+     https://stackoverflow.com/a/79993726
    - the number of iterations of "pause"-based spin-wait loops is 5000,
      before relinquishing to SwitchToThread();
-   - see https://stackoverflow.com/a/44916975 for more details on the
+   - see https://stackoverflow.com/a/44916975/6910868 for more details on the
      implementation of the "pause"-based spin-wait loops;
    - using normal memory store to release a lock:
      FastMM4-AVX uses normal memory store, i.e., the "mov" instruction, rather
-     then the bus-locking "xchg" instruction to write into the synchronization
+     than the bus-locking "xchg" instruction to write into the synchronization
      variable (LockByte) to "release a lock" on a data structure,
-     see https://stackoverflow.com/a/44959764
-     for discussion on releasing a lock;
+     see https://stackoverflow.com/a/44959764/6910868
+     for discussion on releasing a lock, and https://stackoverflow.com/a/79993726
+     for why the plain store is safe here;
      you may define "InterlockedRelease" to get the old behavior of the original
      FastMM4.
    - implemented dedicated lock and unlock procedures that operate with
@@ -57,7 +62,12 @@ Changes in FastMM4-AVX compared to original FastMM4:
      which are set by default (inside the FastMM4Options.inc file) as
      conditional defines. If you undefine these options, you will get the
      old locking mechanism of the original FastMM4 based on loops of Sleep() or
-     SwitchToThread().
+     SwitchToThread();
+     see https://stackoverflow.com/a/79995198/6910868
+     for why waiting in a Sleep() loop can let the thread that released a lock
+     retake it before a woken waiter runs: Windows guarantees no order in which
+     waiting threads acquire a critical section, and Sleep(0) and Sleep(1) are
+     scheduling workarounds rather than ordering guarantees.
 
  - AVX, AVX2 or AVX512 instructions for faster memory copy
    - if the CPU supports AVX or AVX2, use the 32-byte YMM registers
@@ -76,7 +86,10 @@ Changes in FastMM4-AVX compared to original FastMM4:
      memory is lost by padding; however, if your CPU supports
      "Fast Short REP MOVSB" (Ice Lake or newer), you can disable AVX, and align
      by just 8 bytes, and this may even be faster because less memory is wasted
-     on alignment;
+     on alignment; all alignment options (8, 16, 32 bytes) work in both Release
+     and DEBUG/FullDebugMode builds; although some AVX-512 instructions may require
+     64-byte alignment, FastMM4-AVX does not support 64-byte alignment, but uses
+     unaligned move instructions (vmovdqu64) for 512-bit operations instead;
    - with AVX, memory copy is secure - all XMM/YMM/ZMM registers used to copy
      memory are cleared by vxorps/vpxor, so the leftovers of the copied memory
      are not exposed in the XMM/YMM/ZMM registers;
@@ -85,7 +98,15 @@ Changes in FastMM4-AVX compared to original FastMM4:
      since it slows down subsequent SSE code under Skylake / Kaby Lake;
    - on AVX-512, writing to xmm16-xmm31 registers will not affect the turbo
      clocks, and will not impose AVX-SSE transition penalties; therefore, when we
-     have AVX-512, we now only use x(y/z)mm16-31 registers.
+     have AVX-512, we now only use x(y/z)mm16-31 registers;
+   - the wide moves are used only for bulk copy of memory the calling
+     thread owns exclusively, such as a block's contents during
+     reallocation, and never for cross-thread synchronization, which goes
+     through the lock bytes instead; no per-element or whole-register
+     atomicity is assumed, because only aligned 128-bit plain moves are
+     architecturally atomic on CPUs that enumerate AVX, while 256-/512-bit
+     and masked moves carry no documented guarantee, see
+     https://stackoverflow.com/a/79995416/6910868
 
  - Speed improvements due to code optimization and proper techniques
    - if the CPU supports Enhanced REP MOVSB/STOSB (ERMS), use this feature
@@ -98,7 +119,13 @@ Changes in FastMM4-AVX compared to original FastMM4:
      jumps, i.e., use long, 6-byte instructions instead of just short, 2-byte,
      and this may affect branch prediction, so the benefits of branch target
      alignment may not outweigh the disadvantage of affected branch prediction,
-     see https://stackoverflow.com/q/45112065
+     see https://stackoverflow.com/q/45112065/6910868
+     EnableAsmCodeAlign applies under
+     FreePascal only. ForceAsmCodeAlign is honoured under FreePascal, and under
+     Delphi from XE2 onwards; on older Delphi it is a no-op rather than an
+     override, because that inline assembler has no align directive to emit.
+     The spelling differs by compiler: FreePascal takes a bare "align" and
+     Delphi takes the dotted ".align";
    - compare instructions + conditional jump instructions are put together
      to allow macro-op fusion (which happens since Core2 processors, when
      the first instruction is a CMP or TEST instruction and the second
@@ -127,8 +154,11 @@ Changes in FastMM4-AVX compared to original FastMM4:
      redefined by FastMM4 for itself. Even if you set up these compiler options
      differently outside FastMM4, they will be silently redefined, and the new
      values will be used for FastMM4 only;
-   - the type of one-byte synchronization variables (accessed via "lock cmpxchg"
-     or "lock xchg") replaced from Boolean to Byte for stricter type checking;
+   - the type of one-byte synchronization variables (accessed via "lock cmpxchg",
+     or via "xchg" whose memory-operand form locks implicitly) changed from
+     Boolean to Byte for stricter type checking; the assembly spells the pair as
+     "lock cmpxchg" and "lock xchg", and the second prefix is redundant, see
+     https://stackoverflow.com/a/79993726
    - those fixed-block-size memory move procedures that are not needed
      (under the current bitness and alignment combinations) are
      explicitly excluded from compiling, to not rely on the compiler
@@ -141,6 +171,15 @@ Changes in FastMM4-AVX compared to original FastMM4:
      memory functions are only used in Debug mode, i.e., in development
      environment, not in Release (production), the impact of this
      "vulnerability" is minimal (albeit this is a questionable statement)
+   - an allocation size is refused before the arithmetic on it can wrap, rather
+     than after: under FullDebugMode, a size that cannot have the debug block
+     overhead added to it is rejected in the parameter's own type, which is
+     unsigned on FreePascal and signed on Delphi, where the old code handed back
+     a block far smaller than requested and then wrote the block footer outside
+     it (issue #163); on the ordinary path the large block padding is added in
+     NativeUInt, so a 64-bit size at or above 2^63 can no longer overflow a
+     signed intermediate; and the POSIX VirtualAlloc shim takes a pointer-sized
+     size, so a large request reaches valloc untruncated;
    - removed all non-US-ASCII characters, to avoid using UTF-8 BOM, for
      better compatibility with very early versions of Delphi (e.g., Delphi 5),
      thanks to Valts Silaputnins;
@@ -214,12 +253,12 @@ The above tests (on Xeon E5-2667v4 and i9) have been done on 03-May-2018.
 
 Here is the single-threading performance comparison in some selected
 scenarios between FastMM v5.03 dated May 12, 2021 and FastMM4-AVX v1.05
-dated May 20, 2021. FastMM4-AVX is compiled with default options. This 
+dated May 20, 2021. FastMM4-AVX is compiled with default options. This
 test is run on May 20, 2021, under Intel Core i7-1065G7 CPU, Ice Lake
-microarchitecture, base frequency: 1.3 GHz, max turbo frequency: 3.90 GHz, 
-4 cores, 8 threads. Compiled under Delphi 10.3 Update 3, 64-bit target. 
-Please note that these are the selected scenarios where FastMM4-AVX is 
-faster than FastMM5. In other scenarios, especially in multi-threaded 
+microarchitecture, base frequency: 1.3 GHz, max turbo frequency: 3.90 GHz,
+4 cores, 8 threads. Compiled under Delphi 10.3 Update 3, 64-bit target.
+Please note that these are the selected scenarios where FastMM4-AVX is
+faster than FastMM5. In other scenarios, especially in multi-threaded
 with heavy contention, FastMM5 is faster.
 
                                              FastMM5  AVX-br.   Ratio
@@ -262,6 +301,21 @@ If not, see <http://www.gnu.org/licenses/>.
 
 FastMM4-AVX Version History:
 
+- 1.0.14 (16 August 2026) Security: refuse a FullDebugMode allocation size
+  that cannot have the debug overhead added to it (issue #163), and let a
+  large allocation reach valloc untruncated on POSIX, where the VirtualAlloc
+  shim declared its size as Cardinal; restored compilation under Delphi 4.
+
+- 1.0.13 (15 August 2026) Fixed inline assembler alignment directives for
+  Delphi 7 and other pre-XE compilers when ForceAsmCodeAlign was defined;
+  accept a nil pointer in DebugFreeMem under FreePascal; fixed two
+  InterlockedRelease defects.
+
+- 1.0.12 (5 March 2026) Security: Added production-build double-free detection
+  in FastFreeMem (CWE-415), added advanced regression tests for double-free
+  across small/medium/large block paths, and fixed FreePascal install guard
+  handling for pre-initialization allocations.
+
 - 1.0.11 (27 December 2025) Fix Delphi LLVM Linux compilation (issue #35): added
     critical section wrapper procedures for Linux, added PurePascal guards for
     64-bit asm Move procedures, fixed POSIX WriteFile buffer passing.
@@ -272,21 +326,25 @@ FastMM4-AVX Version History:
     preventing exceptions or memory corruption when callers violate ABI by leaving
     values on FPU stack. See https://stackoverflow.com/q/79833922/6910868 for details.
 
-- 1.0.9 (26 November 2025) Security: Added integer overflow protection for large block 
+- 1.0.9 (26 November 2025) Security: Added integer overflow protection for large block
     allocations (CVE-2017-17426 class).
 
-- 1.0.8 (24 November 2025) - Enabled AVX-512 support for Linux builds, including 
-    optimized assembly routines; Integrated GitHub Actions for comprehensive CI/CD 
-    across Linux and Windows,  covering diverse test configurations; 
-    Introduced a new advanced test suite (`AdvancedTest.dpr`) with extended validation 
-    for allocation, reallocations, alignment, and security; Added `PrintCpuFeatures.dpr` 
-    tool for verifying detected CPU features; Updated documentation and code comments 
-    for improved clarity and accuracy across multiple files; Added support for AVX-512 
+- 1.0.8 (24 November 2025) - Enabled AVX-512 support for Linux builds, including
+    optimized assembly routines; Integrated GitHub Actions for comprehensive CI/CD
+    across Linux and Windows,  covering diverse test configurations;
+    Introduced a new advanced test suite (`AdvancedTest.dpr`) with extended validation
+    for allocation, reallocations, alignment, and security; Added `PrintCpuFeatures.dpr`
+    tool for verifying detected CPU features; Updated documentation and code comments
+    for improved clarity and accuracy across multiple files; Added support for AVX-512
     for Linux; Corrected `Move56AVX512` addressing in `FastMM4_AVX512.asm`.
 
-- 1.0.7 (21 March 2023) - implemented the use of umonitor/umwait instructions;
-    thanks to TetzkatLipHoka for the updated FullDebugMode to v1.64
-    of the original FastMM4.
+- 1.0.7 (22 March 2023) - implemented the optional use of user mode wait
+    (WaitPKG) umonitor/umwait instructions to wait for a synchronization
+    variable; it is disabled by default; define the "EnableWaitPKG" conditional
+    define to enable this feature; however, it may not be as efficient
+    as the pause-based loop, so only use this feature if your tests
+    show a clear benefit in your scenarios; thanks to TetzkatLipHoka for the
+    updated FullDebugMode to v1.64 of the original FastMM4.
 
 - 1.0.6 (25 August 2021) - it can now be compiled with any alignment (8, 16, 32)
     regardless of the target (x86, x64) and whether inline assembly is used
@@ -299,8 +357,8 @@ FastMM4-AVX Version History:
     block sizes of 1024 and 2048 bytes, while in previous versions
     instead of 1024-byte blocks there were 1056-byte blocks,
     and instead of 2048-byte blocks were 2176-byte blocks;
-    fixed Delphi compiler hints for 64-bit Release mode; Win32 and Win64 
-    versions compiled under Delphi and FreePascal passed all the FastCode 
+    fixed Delphi compiler hints for 64-bit Release mode; Win32 and Win64
+    versions compiled under Delphi and FreePascal passed all the FastCode
     validation suites.
 
 - 1.05 (20 May 2021) - improved speed of releasing memory blocks on higher thread
@@ -1223,11 +1281,6 @@ interface
 
 {$Include FastMM4Options.inc}
 
-{$IFNDEF FPC}
-{$WARN UNSAFE_CODE OFF}
-{$WARN UNSAFE_TYPE OFF}
-{$ENDIF}
-
 
 {Defines to turn off options enabled by default}
 
@@ -1261,7 +1314,11 @@ interface
 {$ENDIF}
 
 {$IFDEF DontUseSimplifiedInterlockedExchangeByte}
-  {$undef UseSimplifiedInterlockedExchangeByte}
+  {The symbol undefined here is the one the code tests. It used to read
+   UseSimplifiedInterlockedExchangeByte, which nothing defines and nothing
+   tests, so the documented option had no effect and the InterlockedCompareExchangeByte
+   path it selects could not be reached at all.}
+  {$undef SimplifiedInterlockedExchangeByte}
 {$ENDIF}
 
 {$IFDEF DontUseCustomFixedSizeMoveRoutines}
@@ -1276,80 +1333,19 @@ interface
   {$undef AssumeMultiThreaded}
 {$ENDIF}
 
-{Compiler version defines}
-{$IFNDEF fpc}
-  {$IFNDEF BCB}
-    {$IFDEF ver120}
-      {$define Delphi4or5}
-    {$ENDIF}
-    {$IFDEF ver130}
-      {$define Delphi4or5}
-    {$ENDIF}
-    {$IFDEF ver140}
-      {$define Delphi6}
-    {$ENDIF}
-    {$IFDEF ver150}
-      {$define Delphi7}
-    {$ENDIF}
-    {$IFDEF ver170}
-      {$define Delphi2005}
-    {$ENDIF}
-  {$ELSE}
-    {for BCB4, use the Delphi 5 codepath}
-    {$IFDEF ver120}
-      {$define Delphi4or5}
-      {$define BCB4}
-    {$ENDIF}
-    {for BCB5, use the Delphi 5 codepath}
-    {$IFDEF ver130}
-      {$define Delphi4or5}
-    {$ENDIF}
-  {$ENDIF}
-  {$IFDEF ver180}
-    {$define BDS2006}
-  {$ENDIF}
-  {$define 32Bit}
-  {$IFNDEF Delphi4or5}
-    {$if SizeOf(Pointer) = 8}
-      {$define 64Bit}
-      {$undef 32Bit}
-    {$ifend}
-    {$if CompilerVersion >= 23}
-      {$define XE2AndUp}
-    {$ifend}
-    {$define BCB6OrDelphi6AndUp}
-    {$IFNDEF BCB}
-      {$define Delphi6AndUp}
-    {$ENDIF}
-    {$IFNDEF Delphi6}
-      {$define BCB6OrDelphi7AndUp}
-      {$IFNDEF BCB}
-        {$define Delphi7AndUp}
-      {$ENDIF}
-      {$IFNDEF BCB}
-        {$IFNDEF Delphi7}
-          {$IFNDEF Delphi2005}
-            {$define BDS2006AndUp}
-          {$ENDIF}
-        {$ENDIF}
-      {$ENDIF}
-    {$ENDIF}
-  {$ENDIF}
-{$ELSE}
-  {Defines for FreePascal}
-  {$asmmode intel}
-  {$IFDEF CPUX64}
-    {$asmmode intel}
-    {$define 64bit}
-    {$define fpc64bit}
-    {$undef 32bit}
-  {$ELSE}
-    {$define 32bit}
-    {$undef 64bit}
-  {$ENDIF}
+{$I FastMM4CompilerDefines.inc}
+
+{The $WARN directive exists from Delphi 6 and the UNSAFE_CODE and UNSAFE_TYPE
+ warning names from Delphi 7, so these two lines sit below the include that
+ defines the version names; Delphi 4 and 5 rejected them as invalid compiler
+ directives while they stood unguarded above it. FreePascal never defines
+ BCB6OrDelphi7AndUp, so no separate FPC test is needed.}
+{$IFDEF BCB6OrDelphi7AndUp}
+  {$WARN UNSAFE_CODE OFF}
+  {$WARN UNSAFE_TYPE OFF}
 {$ENDIF}
 
-{$IFNDEF 64Bit}
+{$IFNDEF 64BIT}
   {do not support AVX unless we are in the 64-bit mode}
   {$undef EnableAVX}
 {$ENDIF}
@@ -1372,7 +1368,7 @@ interface
   {$undef FastGetMemNeedAssemblerCode}
   {$define FastGetMemNeedPascalCode}
 {$ELSE}
-  {$IFDEF 64bit}
+  {$IFDEF 64BIT}
     {$define AssumePauseAndSwitchToThreadAvailable}
   {$ENDIF}
   {$IFDEF AssumePauseAndSwitchToThreadAvailable}
@@ -1380,7 +1376,7 @@ interface
   {$ENDIF}
 {$ENDIF}
 
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
 
   {$IFDEF EnableAVX}
     {Under 64 bit with AVX, memory blocks must always be 32-byte aligned,
@@ -1405,7 +1401,7 @@ interface
   {$ENDIF}
   {$IFDEF UseReleaseStack}
     {$Message error 'LogLockContention requires FullDebugMode but UseReleaseStack is incompatible with FullDebugMode'}
-  {$ENDIF}  
+  {$ENDIF}
 {$ENDIF}
 
 {Release stack requires ~ASMVersion (for now).}
@@ -1432,8 +1428,8 @@ interface
 
 {$IFDEF Linux}
   {$define POSIX}
-  {$IFDEF 64Bit}
-    {$define PIC}  // Linux 64bit ASM is PIC
+  {$IFDEF 64BIT}
+    {$define PIC}  // Linux 64BIT ASM is PIC
   {$ENDIF}
   {$IFNDEF FPC}
     {$define PurePascal}  // Delphi LLVM Linux needs PurePascal
@@ -1516,9 +1512,9 @@ interface
 {$ENDIF}
 
 {For BASM bits that are not implemented in 64-bit.}
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {$IFDEF ASMVersion}
-    {$define Use32BitAsm}
+    {$define Use32BITAsm}
   {$ENDIF}
 {$ENDIF}
 
@@ -1574,6 +1570,22 @@ interface
   {$ENDIF}
 {$ENDIF}
 
+{Delphi on Linux finalizes System.Classes (pulled in via System.SyncObjs) after
+ FastMM, producing late FreeMem/GetMem calls into a torn-down allocator. Same
+ QC#14070 family as BCB. See issue #55. Unlike the BCB branch above, we do NOT
+ also undef EnableMemoryLeakReporting: BCB undefs it because of the IDE DLL
+ unload path, which does not apply on Linux. Shutdown leak reporting via
+ CheckBlocksOnShutdown runs independently of NeverUninstall and is still
+ desired on Linux Delphi; do not "unify" these two auto-define blocks.
+
+ Library-unload safety: this auto-define targets applications (.dpr programs)
+ that run until process exit. In a shared library (.so) that gets dlclose()'d
+ before the host process ends, keeping FastMM installed would leave the host's
+ MemoryManager pointer referencing code/data being unmapped. Library authors
+ on Linux Delphi who need to uninstall FastMM on unload should define
+ DisableAutoNeverUninstallLinux in their project options.}
+{$IFDEF LINUX}{$IFNDEF FPC}{$IFNDEF DisableAutoNeverUninstallLinux}{$DEFINE NeverUninstall}{$ENDIF}{$ENDIF}{$ENDIF}
+
 {Stack tracer is needed for LogLockContention and for FullDebugMode.}
 {$undef _StackTracer}
 {$undef _EventLog}
@@ -1582,7 +1594,7 @@ interface
 {$IFDEF UseReleaseStack}{$IFDEF DebugReleaseStack}{$define _EventLog}{$ENDIF}{$ENDIF}
 
 
-{$IFNDEF fpc64bit}
+{$IFNDEF fpc64BIT}
   {$IFNDEF unix}
     {$define AllowAsmNoframe}
   {$ENDIF}
@@ -1620,13 +1632,21 @@ interface
 {$define EnableAVX512}
 {$ENDIF}
 
-{$IFDEF 32bit}
+{Define Disable32BitSSE to keep the plain fixed size move routines on a 32-bit
+ build that would otherwise get the SSE ones. The routines the two families
+ replace are the same, so this changes only which of them the allocator
+ installs, and it is what lets a test reach the plain family on a host whose
+ CPU has SSE. See Tests/Simple/FpuStackTest.dpr.}
+{$IFDEF 32BIT}
   {$IFDEF FPC}
-    {$define 32bit_SSE}
+    {$define 32BIT_SSE}
   {$ENDIF}
   {$IFDEF XE2AndUp}
-    {$define 32bit_SSE}
+    {$define 32BIT_SSE}
   {$ENDIF}
+{$ENDIF}
+{$IFDEF Disable32BitSSE}
+{$undef 32BIT_SSE}
 {$ENDIF}
 
 {------------------------Compiler options for FastMM4------------------------}
@@ -1702,17 +1722,17 @@ of just one option: "Boolean short-circuit evaluation".}
 {$ENDIF}
 
 {$IFDEF fpc}
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
 {$undef FastGetMemNeedAssemblerCode}
 {$define FastGetMemNeedPascalCode}
 {$ENDIF}
 {$ENDIF}
 
 {$IFDEF FPC}
-  {$IFDEF 64bit}
+  {$IFDEF 64BIT}
     {$undef ASMVersion}
-    {Assembler is not yet supportd under 64-bit FreePascal,
-    because it incorrectly encodes relative values wither with +RIP or without}
+    {Assembler is not yet supported under 64-bit FreePascal,
+    because it incorrectly encodes relative values either with +RIP or without}
     {$define AuxAsmRoutines}
   {$ENDIF}
 {$ENDIF}
@@ -1754,16 +1774,16 @@ of just one option: "Boolean short-circuit evaluation".}
 {$define Use_GetEnabledXStateFeatures_WindowsAPICall}
 {$ENDIF}
 
-{$IFNDEF 64bit}
+{$IFNDEF 64BIT}
 {$undef EnableAVX512} // AVX-512 is only implemented in 64-bit
 {$ENDIF}
 
 
-{$IFDEF 32bit}
+{$IFDEF 32BIT}
 {$define AuxAsmRoutines}
 {$ENDIF}
 
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
 {$define AuxAsmRoutines}
 {$ENDIF}
 
@@ -1774,9 +1794,36 @@ of just one option: "Boolean short-circuit evaluation".}
 {$ENDIF}
 
 {$IFDEF ForceAsmCodeAlign}
-  {$define AsmCodeAlign}
   {$IFDEF FPC}
-     {$define AsmAlNodot}
+    {$define AsmCodeAlign}
+    {$define AsmAlNodot}
+  {$ELSE}
+    {Delphi gained an align directive part way through its life, so this is a
+     version test rather than a refusal. ".align n" is a documented asm
+     pseudo-instruction with the same meaning as the CODEALIGN n compiler
+     directive, and CODEALIGN arrived in Delphi XE. Before that the assembler
+     has nothing to emit: on Delphi 7, compiler version 15.0, ".align 4" is
+     rejected as an inline assembler syntax error and a bare "align 4" as an
+     undeclared identifier, at every align site the 32-bit path reaches, so
+     defining ForceAsmCodeAlign there produced a unit that would not compile at
+     all rather than an aligned one. That is what issue 81 in this repository
+     reported.
+
+     XE2AndUp is the same boundary the PasCodeAlign block above already uses to
+     decide whether Delphi gets a CODEALIGN directive at all, so the assembler
+     side now agrees with the Pascal side about which compilers have this feature
+     instead of contradicting it. It is one release later than the documentation
+     strictly requires, since the directive landed in XE; that release is left
+     out rather than given a version chain of its own, because XE2AndUp is
+     already computed here and a Delphi XE user can widen this on a compiler they
+     can run.
+
+     Note the spelling: Delphi takes the dotted form, so AsmAlNodot stays
+     FreePascal-only and Delphi reaches the dotted arm of every align site. That
+     is the arm already written there, so nothing else has to change.}
+    {$IFDEF XE2AndUp}
+      {$define AsmCodeAlign}
+    {$ENDIF}
   {$ENDIF}
 {$ENDIF}
 
@@ -1791,13 +1838,13 @@ of just one option: "Boolean short-circuit evaluation".}
 
 {$IFDEF FPC}
   {$IFDEF PurePascal}
-    {$define SynchroVarLongint}
+    {$define SynchroVar32BIT}
   {$ENDIF}
 {$ENDIF}
 
 {$IFDEF LINUX}
   {$IFNDEF FPC}
-    {$define SynchroVarLongint}  // Delphi LLVM Linux needs Longint sync vars
+    {$define SynchroVar32BIT}  // Delphi Linux: AtomicExchange needs at least 32-bit type
   {$ENDIF}
 {$ENDIF}
 
@@ -1819,7 +1866,7 @@ of just one option: "Boolean short-circuit evaluation".}
 {-------------------------Public constants-----------------------------}
 const
   {The current version of FastMM4-AVX}
-  FastMM4AvxVersion = '1.0.11';
+  FastMM4AvxVersion = '1.0.14';
   {The current version of FastMM}
   FastMMVersion = '4.993';
 
@@ -1888,7 +1935,7 @@ type
   TSmallBlockTypeState = record
     {The internal size of the block type}
     InternalBlockSize: Cardinal;
-    {Useable block size: The number of non-reserved bytes inside the block.}
+    {Usable block size: The number of non-reserved bytes inside the block.}
     UseableBlockSize: Cardinal;
     {The number of allocated blocks}
     AllocatedBlockCount: NativeUInt;
@@ -2061,7 +2108,7 @@ function FastAllocMem(ASize: {$IFDEF XE2AndUp}NativeInt{$ELSE}{$IFDEF fpc}Native
 function DebugGetMem(ASize: {$IFDEF FPC}ptruint{$ELSE}{$IFDEF XE2AndUp}NativeInt{$ELSE}Integer{$ENDIF}{$ENDIF}): Pointer;
 function DebugFreeMem(APointer: Pointer): {$IFDEF fpc}ptruint{$ELSE}Integer{$ENDIF};
 function DebugReallocMem({$IFDEF FPC}var {$ENDIF}APointer: Pointer; ANewSize: {$IFDEF FPC}ptruint{$ELSE}{$IFDEF XE2AndUp}NativeInt{$ELSE}Integer{$ENDIF}{$ENDIF}): Pointer;
-function DebugAllocMem(ASize: {$IFDEF XE2AndUp}NativeInt{$ELSE}Cardinal{$ENDIF}): Pointer;
+function DebugAllocMem(ASize: {$IFDEF XE2AndUp}NativeInt{$ELSE}{$IFDEF fpc}NativeUInt{$ELSE}Cardinal{$ENDIF}{$ENDIF}): Pointer;
 {Scans the memory pool for any corruptions. If a corruption is encountered, an "Out of Memory" exception is
  raised.}
 procedure ScanMemoryPoolForCorruptions;
@@ -2174,14 +2221,16 @@ const
   MaxFakeVMTEntries = 200;
   {The pattern used to fill unused memory}
   DebugFillByte = $80;
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   DebugFillPattern = $01010101 * Cardinal(DebugFillByte); // Default value $80808080
   {The address that is reserved so that accesses to the address of the fill
    pattern will result in an A/V. (Not used under 64-bit, since the upper half
    of the address space is always reserved by the OS.)}
   DebugReservedAddress = $01010000 * Cardinal(DebugFillByte); // Default value $80800000
 {$ELSE}
-  DebugFillPattern = $8080808080808080;
+  {The cast is required: with range checking on, an untyped $8080808080808080
+   is taken as a signed 64-bit constant and reported as out of range.}
+  DebugFillPattern = NativeUInt($8080808080808080);
 {$ENDIF}
   {The number of bytes of address space that cannot be allocated under FullDebugMode.  This block is reserved on
   startup and freed the first time the system runs out of address space.  This allows some subsequent memory allocation
@@ -2290,15 +2339,9 @@ procedure GetFastMMCpuUserModeMonitorLineSizes(var Smallest, Largest: Word);
 procedure FastMMDisableWaitPKG;
 {$ENDIF}
 
-
 implementation
 
 uses
-{$IFDEF LINUX}
-  {$IFNDEF FPC}
-System.SyncObjs,
-  {$ENDIF}
-{$ENDIF}
 {$IFNDEF POSIX}
   Windows,
   {$IFDEF _EventLog}
@@ -2319,7 +2362,7 @@ System.SyncObjs,
     {$ELSE}
        {$IFDEF LINUX}
         // Modern Delphi (LLVM) on Linux uses Posix.* units, not Libc
-        Posix.Stdlib, Posix.Unistd, Posix.Fcntl, Posix.PThread,
+        Posix.SysTypes, Posix.Stdlib, Posix.Unistd, Posix.Fcntl, Posix.PThread,
       {$ELSE}
         // Fallback for old Kylix or strictly legacy targets expecting Libc
         Libc,
@@ -2341,26 +2384,28 @@ System.SyncObjs,
 {$IFDEF UseReleaseStack}
   FastMM4LockFreeStack,
 {$ENDIF}
-{$IF Defined( FullDebugMode ) AND Defined( LoadDebugDLLDynamically ) AND Defined( MemoryLoadLibrarySupport )}
+{$IFDEF FullDebugMode}{$IFDEF LoadDebugDLLDynamically}{$IFDEF MemoryLoadLibrarySupport}
   FastMMMemoryModule,
-{$IFEND}
+{$ENDIF}{$ENDIF}{$ENDIF}
   FastMM4Messages;
 
-{$IF Defined( FullDebugMode ) AND Defined( LoadDebugDLLDynamically ) AND Defined( MemoryLoadLibrarySupport )}
-{$IF Defined( IncludeResource_madExcept )}
+{$IFDEF FullDebugMode}{$IFDEF LoadDebugDLLDynamically}{$IFDEF MemoryLoadLibrarySupport}
+{$IFDEF IncludeResource_madExcept}
   {$IFDEF Win64}
     {$R FastMM_FullDebugMode_madExcept64.res}
   {$ELSE}
     {$R FastMM_FullDebugMode_madExcept.res}
   {$ENDIF}
-{$ELSEIF Defined( IncludeResource )}
-  {$IFDEF Win64}
-    {$R FastMM_FullDebugMode64.res}
-  {$ELSE}
-    {$R FastMM_FullDebugMode.res}
+{$ELSE}
+  {$IFDEF IncludeResource}
+    {$IFDEF Win64}
+      {$R FastMM_FullDebugMode64.res}
+    {$ELSE}
+      {$R FastMM_FullDebugMode.res}
+    {$ENDIF}
   {$ENDIF}
-{$IFEND Defined( IncludeResource_madExcept )}
-{$IFEND}
+{$ENDIF IncludeResource_madExcept}
+{$ENDIF}{$ENDIF}{$ENDIF}
 
 const
   MaxFileNameLength                  = 1024;
@@ -2382,8 +2427,13 @@ procedure free(__ptr:pointer);cdecl;external clib name 'free';
 function usleep(__useconds:dword):longint;cdecl;external clib name 'usleep';
 {$ENDIF}
 
-{Fixed size move procedures. The 64-bit versions assume 16-byte alignment.}
-{$IFDEF 64bit}
+{Fixed size move procedures. The 64-bit versions assume 16-byte alignment.
+These moves copy only memory the calling thread owns exclusively, and none of
+them is relied on for atomicity: only aligned 128-bit plain moves are
+architecturally atomic on CPUs that enumerate AVX, while 256-/512-bit and
+masked moves carry no documented guarantee, see
+https://stackoverflow.com/a/79995416/6910868 }
+{$IFDEF 64BIT}
 {$IFDEF Align32Bytes}
   {Used to exclude the procedures that we don't need, from compiling, to not
   rely on the "smart" linker to do this job for us}
@@ -2405,7 +2455,7 @@ procedure Move60(const ASource; var ADest; ACount: NativeInt); forward;
 procedure Move68(const ASource; var ADest; ACount: NativeInt); forward;
 {$ENDIF}
 
-{$IFDEF 64Bit}
+{$IFDEF 64BIT}
 {These are not needed and thus unimplemented under 32-bit}
 {$IFNDEF ExcludeSmallGranularMoves}
 procedure Move8(const ASource; var ADest; ACount: NativeInt); forward;
@@ -2487,6 +2537,10 @@ const
   MediumBlockGranularity = UnsignedBit shl MediumBlockGranularityPowerOf2;
   MediumBlockGranularityMask = NativeUInt(-NativeInt(MediumBlockGranularity));
 
+  {Minimum page size mask for page-alignment validation. VirtualAlloc/valloc
+   return at least 4KB-aligned memory on all supported platforms.}
+  MinimumPageSizeMask = $FFF;
+
   {The granularity of large blocks}
   LargeBlockGranularity = 65536;
   {The maximum size of a small block. Blocks larger than this are either
@@ -2498,7 +2552,7 @@ const
    The value is set conservatively below where malicious overflow values typically appear
    (e.g., $FFFFFFFFFFEFFFA9, $FFFFFFFFFFF00000 on 64-bit). These "attack" values are
    designed to wrap around when overhead is added.}
-  {$IFDEF 64bit}
+  {$IFDEF 64BIT}
   MaxSafeLargeBlockSize = NativeUInt($FFFFFFFFFFE00000); {~2MB below max, blocks overflow attack values}
   {$ELSE}
   MaxSafeLargeBlockSize = NativeUInt($FFFE0000); {Conservative estimate for 32-bit}
@@ -2629,10 +2683,10 @@ const
 {$ENDIF}
 
 {$IFDEF _StackTracer}
-{$IFDEF 32Bit}
-  FullDebugModeLibraryName = FullDebugModeLibraryName32Bit;
+{$IFDEF 32BIT}
+  FullDebugModeLibraryName = FullDebugModeLibraryName32BIT;
 {$ELSE}
-  FullDebugModeLibraryName = FullDebugModeLibraryName64Bit;
+  FullDebugModeLibraryName = FullDebugModeLibraryName64BIT;
 {$ENDIF}
 {$ENDIF}
 
@@ -2669,7 +2723,7 @@ type
   {The layout of a string allocation. Used to detect string leaks.}
   PStrRec = ^StrRec;
   StrRec = packed record
-{$IFDEF 64Bit}
+{$IFDEF 64BIT}
     _Padding: Integer;
 {$ENDIF}
 {$IFDEF BCB6OrDelphi6AndUp}
@@ -2689,8 +2743,12 @@ type
 {$ENDIF}
 
   TSynchronizationVariable =
-  {$IFDEF SynchroVarLongint}
-    LongInt
+  {$IFDEF SynchroVar32BIT}
+    {$IFDEF FPC}
+    LongInt       // FPC: LongInt is always 4 bytes; matches InterlockedExchange signature
+    {$ELSE}
+    Integer       // Delphi: Integer is always 4 bytes (LongInt is 8 on Linux 64-bit LP64)
+    {$ENDIF}
   {$ELSE}
     {$IFDEF XE2AndUp}
       System.ShortInt
@@ -2699,6 +2757,14 @@ type
     {$ENDIF}
   {$ENDIF}
   ;
+
+{$IFDEF OperatorsInDefinesSupported}
+{$IFDEF SynchroVar32BIT}
+  {$IF SizeOf(TSynchronizationVariable) <> 4}
+    {$Message Fatal 'TSynchronizationVariable must be 4 bytes for atomic operations'}
+  {$IFEND}
+{$ENDIF}
+{$ENDIF}
 
   {---------------Small block structures-------------}
 
@@ -2717,7 +2783,7 @@ type
     {Bitmap indicating which of the first 8 medium block groups contain blocks
      of a suitable size for a block pool.}
     AllowedGroupsForBlockPoolBitmap: Byte;
-{$IFDEF SynchroVarLongint}
+{$IFDEF SynchroVar32BIT}
     Reserved2: Byte;
 {$ENDIF}
     {The block size for this block type}
@@ -2744,11 +2810,11 @@ type
      that often) the variable size move routine is used.}
     UpsizeMoveProcedure: TMoveProc;
 {$ELSE}
-    {$IFNDEF SynchroVarLongint}
+    {$IFNDEF SynchroVar32BIT}
     Reserved1: Pointer;
     {$ENDIF}
 {$ENDIF}
-    {$IFDEF 64bit}
+    {$IFDEF 64BIT}
     Reserved3: Pointer;
     {$ENDIF}
 {$IFDEF UseReleaseStack}
@@ -2763,10 +2829,18 @@ type
   TSmallBlockPoolHeader = record
     {BlockType}
     BlockType: PSmallBlockType;
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
     {Align the next fields to the same fields in TSmallBlockType and pad this
      structure to 32 bytes for 32-bit}
     Reserved1: Cardinal;
+{$ENDIF}
+{$IFDEF SynchroVar32BIT}
+  {$IFDEF 64BIT}
+    {When SynchroVar32BIT is defined, TSmallBlockType has a 4-byte lock field
+     plus Byte+Byte+Word+Word+Word = 12 bytes before NextPartiallyFreePool,
+     which aligns to offset 16. Add padding here to match that offset.}
+    ReservedPoolAlign: Pointer;
+  {$ENDIF}
 {$ENDIF}
     {The next and previous pool that has free blocks of this size. Do not
      change the position of these two fields: They must be at the same offsets
@@ -2782,10 +2856,27 @@ type
     Reserved2: Cardinal;
     {The pool pointer and flags of the first block}
     FirstBlockPoolPointerAndFlags: NativeUInt;
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
+  {$IFDEF SynchroVar32BIT}
+    Reserved3: Pointer; // One less reserved field to compensate for ReservedPoolAlign
+  {$ELSE}
     Reserved3, Reserved4: Pointer; // Align the structure to 64-bit size
+  {$ENDIF}
 {$ENDIF}
   end;
+
+{Compile-time struct size guards}
+{$IFDEF OperatorsInDefinesSupported}
+  {$IFDEF 64BIT}
+    {$if SizeOf(TSmallBlockPoolHeader) <> 64}
+      {$Message Fatal 'TSmallBlockPoolHeader must be 64 bytes on 64-bit'}
+    {$ifend}
+  {$ELSE}
+    {$if SizeOf(TSmallBlockPoolHeader) <> 32}
+      {$Message Fatal 'TSmallBlockPoolHeader must be 32 bytes on 32-bit'}
+    {$ifend}
+  {$ENDIF}
+{$ENDIF}
 
   {Small block layout:
    At offset -SizeOf(Pointer) = Flags + address of the small block pool.
@@ -2805,7 +2896,7 @@ type
     NextMediumBlockPoolHeader: PMediumBlockPoolHeader;
     {Padding}
     Reserved1: NativeUInt;
-    {$IFDEF 32bit}
+    {$IFDEF 32BIT}
     {$IFDEF Align32Bytes}
     Reserved2, Reserved3, Reserved4, Reserved5: Pointer;
     {$ENDIF}
@@ -2838,7 +2929,7 @@ type
      list is used to track memory leaks on program shutdown.}
     PreviousLargeBlockHeader: PLargeBlockHeader;
     NextLargeBlockHeader: PLargeBlockHeader;
-    {$IFDEF 32bit}
+    {$IFDEF 32BIT}
     {$IFDEF Align32Bytes}
     Reserved1, Reserved2, Reserved3, Reserved4: Pointer;
     {$ENDIF}
@@ -2890,7 +2981,7 @@ type
 
 {-------------------------Private constants----------------------------}
 const
-  {$IFDEF 32bit}
+  {$IFDEF 32BIT}
   MediumFreeBlockSizePowerOf2 = 3;
   {$ELSE}
   MediumFreeBlockSizePowerOf2 = 4;
@@ -2911,10 +3002,10 @@ const
 {$ENDIF}
 
 {$IFDEF SmallBlockTypeRecSizeIsPowerOf2}
-  {$IFDEF 32bit}
+  {$IFDEF 32BIT}
     SmallBlockTypeRecSizePowerOf2 = 5;
   {$ENDIF}
-  {$IFDEF 64bit}
+  {$IFDEF 64BIT}
     SmallBlockTypeRecSizePowerOf2 = 6;
   {$ENDIF}
   SmallBlockTypeRecSize = Byte(UnsignedBit shl SmallBlockTypeRecSizePowerOf2);
@@ -2940,7 +3031,7 @@ const
   {The size of a small block pool header: 32 bytes for 32-bit, 64 bytes for 64-bit).}
   SmallBlockPoolHeaderSize = SizeOf(TSmallBlockPoolHeader);
   {$IFDEF OperatorsInDefinesSupported}
-    {$IFDEF 32bit}
+    {$IFDEF 32BIT}
     {$if SmallBlockPoolHeaderSize <> 32}
        {$Message Fatal 'SmallBlockPoolHeaderSize should be 32 bytes for 32-bit'}
     {$ifend}
@@ -2954,7 +3045,7 @@ const
   {The size of a medium block pool header: 16 bytes for 32-bit and 32 bytes for 64-bit.}
   MediumBlockPoolHeaderSize = SizeOf(TMediumBlockPoolHeader);
   {$IFDEF OperatorsInDefinesSupported}
-    {$IFDEF 32bit}
+    {$IFDEF 32BIT}
       {$IFDEF Align32Bytes}
         {$if MediumBlockPoolHeaderSize <> 32}
            {$Message Fatal 'MediumBlockPoolHeaderSize should be 32 bytes for 32-bit with 32-bytes alignment'}
@@ -2982,12 +3073,44 @@ const
 
   {The distinction between AVX1 and AVX2 is on how it clears the registers
   and how it avoids AVX-SSE transition penalties.
-  AVX2 uses the VPXOR instruction, not available on AVX1. On most Intel
-  processors, VPXOR is faster is VXORPS. For example, on Sandybridge, VPXOR can
-  run on any of the 3 ALU execution ports, p0/p1/p5.  VXORPS can only run on p5.
-  Also, AVX1 uses the VZEROUPPER instruction, while AVX2 does not. Newer CPU
-  doesn't have such a huge transition penalty, and VZEROUPPER is not needed,
-  moreover, it can make subsequent SSE code slower}
+  AVX2 uses the 256-bit VPXOR on YMM registers, a form AVX1 lacks; AVX1 has
+  only the 128-bit VPXOR on XMM registers. Through Broadwell the 256-bit
+  integer form issued to any of the three ALU ports p0/p1/p5 while VXORPS was
+  limited to p5, which is where the claim that VPXOR is the faster of the two
+  comes from. From Skylake the floating-point logicals issue to p0/p1/p5 as
+  well, so on those parts the difference is historical rather than current.
+  Measured port usage per microarchitecture is at
+  https://uops.info/html-instr/VXORPS_YMM_YMM_YMM.html
+  and https://uops.info/html-instr/VPXOR_YMM_YMM_YMM.html
+  Also, AVX1 uses the VZEROUPPER instruction, while AVX2 does not. A newer CPU
+  does not have such a huge transition penalty, and the dirty upper state it
+  leaves behind is what can make subsequent SSE code slower.
+  What the penalty is differs by vendor and by generation. AMD keeps the halves
+  of a vector register independent and has no such transition. On Intel through
+  Broadwell, a legacy SSE instruction executed while the upper halves are dirty
+  triggers a transition assist that saves those halves and later restores them,
+  and the assist is the cost. From Skylake there is no assist, and the cost
+  appears instead as a false dependency: a non-VEX write to an xmm register
+  merges into the upper half that register already held, so it waits on a value
+  it does not use. The two mechanisms and the measurements behind them are set
+  out at:
+  https://stackoverflow.com/a/43881748/6910868
+
+  Leaving VZEROUPPER out of the AVX2 routines is therefore a trade rather than a
+  free choice, and which way it goes depends on how much legacy SSE code runs
+  afterwards. The instruction is four front-end uops on Intel from Sandy Bridge
+  to Ice Lake and is paid once, per
+  https://uops.info/html-instr/VZEROUPPER.html
+  while the false dependency it would break is paid on every later non-VEX write
+  to an xmm register, so omitting it pays off only when little such code
+  follows. No measurement of where that crossover falls for this allocator's
+  callers has been made here. It does not follow that the state is
+  clean when those routines return: zeroing a register with a VEX encoded vpxor
+  changes what the register holds, not the state the hardware tracks, and only
+  VZEROUPPER or VZEROALL clear that. On an AVX2 part older than Skylake, meaning
+  Haswell and Broadwell, legacy SSE code that runs afterwards can still pay the
+  transition assist. The AVX1 routines call VZEROUPPER on entry and on exit and do not
+  have that exposure.}
   {On ERMSB, see p. 3.7.6 of the
   Intel 64 and IA-32 Architectures Optimization Reference Manual}
 
@@ -3014,7 +3137,7 @@ const
 {$ENDIF}
 {$ENDIF}
 
-{$IFDEF 32bit_SSE}
+{$IFDEF 32BIT_SSE}
   {CPU supports xmm registers in 32-bit mode}
   FastMMCpuFeatureSSE                           = Byte(UnsignedBit shl 6);
 {$ENDIF}
@@ -3032,29 +3155,71 @@ const
 
 {$IFDEF LINUX}
   {$IFNDEF FPC}
-  {Delphi LLVM on Linux needs wrapper procedures for critical sections}
+  {Delphi LLVM on Linux: use POSIX pthread_mutex directly instead of
+   System.SyncObjs.TCriticalSection, because System.SyncObjs pulls in
+   System.Classes whose finalization runs after FastMM4 is uninstalled,
+   causing EInvalidPointer in FreeMem (GitHub issue #39).
+   Posix.PThread is already in the uses clause and has no
+   initialization or finalization side effects.}
 type
-  TRtlCriticalSection = System.SyncObjs.TCriticalSection;
+  TRtlCriticalSection = pthread_mutex_t;
 
 procedure InitializeCriticalSection(var CS: TRtlCriticalSection);
+var
+  Attr: pthread_mutexattr_t;
+  LResult: Integer;
 begin
-  CS := TRtlCriticalSection.Create;
+  LResult := pthread_mutexattr_init(Attr);
+  if LResult <> 0 then
+    System.Error(reInvalidOp);
+  LResult := pthread_mutexattr_settype(Attr, PTHREAD_MUTEX_RECURSIVE);
+  if LResult <> 0 then
+  begin
+    LResult := pthread_mutexattr_destroy(Attr);
+    if LResult <> 0 then
+      System.Error(reInvalidOp);
+    System.Error(reInvalidOp);
+  end;
+  LResult := pthread_mutex_init(CS, Attr);
+  if LResult <> 0 then
+  begin
+    LResult := pthread_mutexattr_destroy(Attr);
+    if LResult <> 0 then
+      System.Error(reInvalidOp);
+    System.Error(reInvalidOp);
+  end;
+  LResult := pthread_mutexattr_destroy(Attr);
+  if LResult <> 0 then
+    System.Error(reInvalidOp);
 end;
 
 procedure DeleteCriticalSection(var CS: TRtlCriticalSection);
+var
+  LResult: Integer;
 begin
-  CS.Free;
-  CS := nil;
+  LResult := pthread_mutex_destroy(CS);
+  if LResult <> 0 then
+    System.Error(reInvalidOp)
+  else
+    FillChar(CS, SizeOf(CS), 0);
 end;
 
 procedure EnterCriticalSection(var CS: TRtlCriticalSection);
+var
+  LResult: Integer;
 begin
-  CS.Enter;
+  LResult := pthread_mutex_lock(CS);
+  if LResult <> 0 then
+    System.Error(reInvalidOp);
 end;
 
 procedure LeaveCriticalSection(var CS: TRtlCriticalSection);
+var
+  LResult: Integer;
 begin
-  CS.Leave;
+  LResult := pthread_mutex_unlock(CS);
+  if LResult <> 0 then
+    System.Error(reInvalidOp);
 end;
   {$ENDIF}
 {$ENDIF}
@@ -3229,7 +3394,7 @@ var
    This table helps us to quickly access a corresponding TSmallBlockType entry in the
    SmallBlockTypes array.}
 
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {$IFNDEF LogLockContention}
     {$DEFINE AllocSize2SmallBlockTypesPrecomputedOffsets}
   {$ENDIF}
@@ -3261,7 +3426,7 @@ var
    {Since the size of TSmallBlockType is 64 bytes in 64-bit mode and 32 bytes in 32-bit mode,
    but the maximum scale factor of an index is 8 when calculating an offset on Intel CPUs,
    and the table contains more than 40 elements, one byte in the table is not enough to hold any
-   offfset value divided by 8, so, for 64-bit mode, we keep here just indexes, and use one additional shl command,
+   offset value divided by 8, so, for 64-bit mode, we keep here just indexes, and use one additional shl command,
    no offsets are precomputed}
   AllocSize2SmallBlockTypesIdx: array[0..(MaximumSmallBlockSize - 1) div SmallBlockGranularity] of Byte;
 {$ENDIF}
@@ -3281,7 +3446,7 @@ var
 
   {The sequential feed medium block pool.}
   LastSequentiallyFedMediumBlock: Pointer;
-  MediumSequentialFeedBytesLeft: Cardinal;
+  MediumSequentialFeedBytesLeft: NativeUInt;
   {The medium block bins are divided into groups of 32 bins. If a bit
    is set in this group bitmap, then at least one bin in the group has free
    blocks.}
@@ -3403,7 +3568,7 @@ var
 
 {$IFDEF USE_CPUID}
   {See FastMMCpuFeature... constants.
-  We have packe the most interesting CPUID bits in one byte for faster comparison
+  We have packed the most interesting CPUID bits in one byte for faster comparison
   These features are mostly used for faster memory move operations}
   FastMMCpuFeaturesA: Byte;
   FastMMCpuFeaturesB: Byte;
@@ -3422,7 +3587,7 @@ var
 {A copy of StrLen in order to avoid the SysUtils unit, which would have
  introduced overhead like exception handling code.}
 function StrLen(const AStr: PAnsiChar): NativeUInt;
-{$IFNDEF Use32BitAsm}
+{$IFNDEF Use32BITAsm}
 begin
   Result := 0;
   while AStr[Result] <> #0 do
@@ -3468,7 +3633,7 @@ end;
 {$IFDEF USE_CPUID}
 {Returns true if the CPUID instruction is supported}
 function CPUID_Supported: Boolean;
-{$IFDEF 32bit} assembler;
+{$IFDEF 32BIT} assembler;
 
 {QUOTE from the Intel 64 and IA-32 Architectures Software Developer's Manual
 
@@ -3494,18 +3659,18 @@ asm
   xor eax, edx
   setnz al
 end;
-{$ELSE 32bit}
+{$ELSE 32BIT}
 
 {$IFDEF FASTMM4_ALLOW_INLINES}inline;{$ENDIF}
 // CPUID is always supported on 64-bit platforms
 begin
   Result := True;
 end;
-{$ENDIF 32bit}
+{$ENDIF 32BIT}
 
 {Gets the CPUID}
 procedure GetCPUID(AEax, AEcx: Cardinal; var R: TCpuIdRegisters); assembler;
-{$IFDEF 32bit}
+{$IFDEF 32BIT}
 asm
   push ebx
   push esi
@@ -3535,7 +3700,7 @@ asm
   pop esi
   pop ebx
 end;
-{$ELSE 32bit}
+{$ELSE 32BIT}
 asm
 {$IFDEF AllowAsmNoframe}
   .noframe
@@ -3594,7 +3759,7 @@ For Unix (Linux), we use "System V AMD64 ABI" calling convention. }
   mov TCpuIdRegisters[r10].RegEDX, edx
   mov rbx, r9
 end;
-{$ENDIF 32bit}
+{$ENDIF 32BIT}
 
 {$ENDIF USE_CPUID}
 
@@ -3605,6 +3770,18 @@ const
   cLockByteFinished  = 113;
 
 // the spin-wait loop count for the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+// The shape of that loop earns as much as this count does: the loop reads the
+// lock byte with a plain load and attempts the locked exchange only once that
+// load looks promising, which keeps a waiting core from driving locked
+// read-modify-writes at the line the writer needs exclusively.
+// This count is a number of PAUSE instructions and not an amount of time, and
+// the two are not related by a constant. Intel gives PAUSE about 10 cycles on
+// the microarchitectures before Skylake and as many as 140 on Skylake itself;
+// other Intel generations and AMD parts sit elsewhere again, so the same 5000
+// iterations are a different wait on every part this constant is compiled for.
+// Measure on the target before changing it.
+// See https://stackoverflow.com/a/79993745/6910868
+// and https://stackoverflow.com/a/44916975/6910868 for the loop itself.
   cPauseSpinWaitLoopCount = 5000;
   cUMWaitTime             = 7000000;
 
@@ -3612,12 +3789,63 @@ const
 {$define UseNormalLoadBeforeAcquireLock}
 {$ENDIF}
 
+{ InterlockedRelease is refused together with the assembler allocator, because
+the two produce a program that faults on its first release of a small block.
+Each assembler unlock site emits a bare LOCK prefix in front of a MOV of
+cLockByteAvailable into the lock byte. LOCK is architecturally valid only on
+ADD, ADC, AND, BTC, BTR, BTS, CMPXCHG, CMPXCHG8B, CMPXCHG16B, DEC, INC, NEG,
+NOT, OR, SBB, SUB, XOR, XADD and XCHG; on anything else the processor raises an
+invalid opcode exception. The assembler accepts the pair and the fault arrives at run
+time, which is what makes the combination worth refusing here rather than
+leaving to be discovered.
+Measured with FreePascal 3.2.2 for win32: AdvancedTest built with
+-dInterlockedRelease stops with runtime error 216 before its first test line,
+and the same build with -dDontUseASMVersion passes all 26.
+The repair is to write the release as an exchange through a scratch register at
+each of those sites, which is its own change against the assembler. Until then
+InterlockedRelease is available with PurePascal or DontUseASMVersion, and on
+64-bit FreePascal, where ASMVersion is undefined in any case. }
+
+{$IFDEF InterlockedRelease}
+  {$IFDEF ASMVersion}
+  {$message error 'InterlockedRelease emits a LOCK prefix on MOV in the assembler unlock paths, which faults at run time. Build with PurePascal or DontUseASMVersion, or leave InterlockedRelease undefined.'}
+  {$ENDIF}
+{$ENDIF}
+
+{ The restored InterlockedCompareExchangeByte below is assembler with no Pascal
+body, so the option that selects it cannot be combined with a build that
+excludes assembler. PurePascal is decided by this point: the user can define
+it, and this unit defines it itself for Delphi on Linux. Refusing here turns a
+combination that would otherwise fail inside an asm block into a message that
+names the conflict and the ways out. }
+
+{$IFNDEF SimplifiedInterlockedExchangeByte}
+  {$IFDEF PurePascal}
+  {$message error 'DontUseSimplifiedInterlockedExchangeByte selects an assembler-only InterlockedCompareExchangeByte, which a PurePascal build excludes. Remove one of the two options.'}
+  {$ENDIF}
+{$ENDIF}
+
 {$IFDEF SimplifiedInterlockedExchangeByte}
+
+{ Which of the two routines below is compiled used to follow the acquire path
+alone: AcquireLockTryNormalLoadFirst when UseNormalLoadBeforeAcquireLock is
+defined, InterlockedExchangeByte otherwise. ReleaseLockByte needs the latter as
+well when InterlockedRelease is defined, and the two conditions are unrelated,
+so the release is asked for here rather than left to fall out of the acquire.
+Without this, InterlockedRelease failed to compile on every build that is not
+PurePascal. }
+
+{$IFNDEF UseNormalLoadBeforeAcquireLock}
+  {$define NeedInterlockedExchangeByte}
+{$ENDIF}
+{$IFDEF InterlockedRelease}
+  {$define NeedInterlockedExchangeByte}
+{$ENDIF}
 
 {$IFDEF UseNormalLoadBeforeAcquireLock}
 function AcquireLockTryNormalLoadFirst(var Target: TSynchronizationVariable): TSynchronizationVariable; assembler;
 asm
-{$IFDEF 32bit}
+{$IFDEF 32BIT}
   {On entry:
     eax = Target address}
   mov ecx, eax
@@ -3650,12 +3878,26 @@ asm
 {$ENDIF}
 @Exit:
 end;
-{$ELSE}
+{$ENDIF UseNormalLoadBeforeAcquireLock}
+
+{$IFDEF NeedInterlockedExchangeByte}
+
+{ The assembler body is chosen on the same condition that lets
+AcquireLockTryNormalLoadFirst above be written in assembler, which is the
+absence of PurePascal, rather than on ASMVersion. ASMVersion is undefined for
+64-bit FreePascal, and there the Pascal body reaches Windows.InterlockedExchange8,
+which FreePascal does not declare. That was invisible while this function was
+compiled only for builds that also undefine UseNormalLoadBeforeAcquireLock; it
+became a compile error as soon as InterlockedRelease could reach it. Neither
+routine here uses a memory operand with a relative address, which is the
+encoding 64-bit FreePascal gets wrong and the reason ASMVersion is undefined
+for it. }
+
 function InterlockedExchangeByte(var Target: TSynchronizationVariable; const Value: TSynchronizationVariable): TSynchronizationVariable;
-{$IFNDEF ASMVersion}
+{$IFDEF PurePascal}
 begin
   Result :=
-  {$IFDEF SynchroVarLongint}
+  {$IFDEF SynchroVar32BIT}
   {$IFDEF LINUX}
     {$IFDEF FPC}
     InterlockedExchange
@@ -3670,17 +3912,17 @@ begin
   {$ENDIF}
   (Target, Value);
 end;
-{$ELSE ASMVersion}
+{$ELSE PurePascal}
 assembler;
 asm
-{$IFDEF 32bit}
+{$IFDEF 32BIT}
   {On entry:
     eax = Target address,
     dl  = NewVal}
   mov ecx, eax
   movzx eax, dl
   lock xchg [ecx], al
-{$ELSE 32bit}
+{$ELSE 32BIT}
   {$IFNDEF unix}
   {On entry:
     rcx = Target address
@@ -3699,8 +3941,10 @@ asm
   {$ENDIF}
 {$ENDIF}
 end;
-{$ENDIF 32bit}
-{$ENDIF ASMVersion}
+{$ENDIF PurePascal}
+{$ENDIF NeedInterlockedExchangeByte}
+
+{$undef NeedInterlockedExchangeByte}
 
 {$ELSE !SimplifiedInterlockedExchangeByte}
 
@@ -3711,9 +3955,9 @@ of FastMM4 version 4.992. }
 {Compare [AAddress], CompareVal:
  If Equal: [AAddress] := NewVal and result = CompareVal
  If Unequal: Result := [AAddress]}
-function InterlockedCompareExchangeByte(const CompareVal, NewVal: TSynchronizationVariable; var Target: TSynchronizationVariable): TSynchronizationVariable; assembler; {$IFDEF fpc64bit}nostackframe;{$ENDIF}
+function InterlockedCompareExchangeByte(const CompareVal, NewVal: TSynchronizationVariable; var Target: TSynchronizationVariable): TSynchronizationVariable; assembler; {$IFDEF fpc64BIT}nostackframe;{$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {On entry:
     al = CompareVal,
     dl = NewVal,
@@ -3738,7 +3982,7 @@ loaded into byte ptr [ecx]. Else, clear ZF and load byte ptr [ecx] into AL.}
   {Workaround for Kylix compiler bug}
   db $F0, $0F, $B0, $11
   {$ENDIF unix}
-{$ELSE 32Bit}
+{$ELSE 32BIT}
 
 {Microsoft's Win64 "x64 ABI" calling convention.}
 
@@ -3750,7 +3994,7 @@ loaded into byte ptr [ecx]. Else, clear ZF and load byte ptr [ecx] into AL.}
   {$IFDEF AllowAsmNoframe}
   .noframe
   {$ENDIF}
-  movzx rax, cl {Remove false dependency on remainig bits of the rax}
+  movzx rax, cl {Remove false dependency on remaining bits of the rax}
   xor rcx, rcx
   lock cmpxchg byte ptr [r8], dl  // cmpxchg also uses AL as an implicit operand
   xor rdx, rdx
@@ -3773,7 +4017,7 @@ registers RDI, RSI, RDX, RCX; return value is stored in RAX and RDX.}
    xor rdi, rdi
    xor rdx, rdx
   {$ENDIF unix}
-{$ENDIF 32Bit}
+{$ENDIF 32BIT}
 end;
 
 {$ENDIF SimplifiedInterlockedExchangeByte}
@@ -3832,7 +4076,7 @@ procedure AcquireSpinLockMediumBlocks; assembler;
 { Note that the assembler version of AcquireSpinLockMediumBlocks is assumed to preserve all volate registers except eax for 32-bit / rax for 64-bit).}
 
 asm
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
 
 // 64-bit code for AcquireSpinLockMediumBlocks
   {$IFDEF AllowAsmNoframe}
@@ -3852,7 +4096,7 @@ asm
    lock xchg [r8], al
    cmp  al, cLockByteLocked
    je   @DidntLockAtFirstAttempt
-   jmp  @Finish64Bit
+   jmp  @Finish64BIT
 @DidntLockAtFirstAttempt:
 
 {$IFDEF EnableWaitPKG}
@@ -3863,6 +4107,9 @@ asm
    jz   @NoWaitPKG
 
    // Start of Umonitor-related section
+   // The sequence below, including the re-read of the lock byte between arming
+   // the monitor and waiting on it, follows the worked umonitor/umwait spin-wait
+   // loop at https://stackoverflow.com/a/78095037/6910868
    mov  eax, cLockByteLocked
    push rcx
    push rdx
@@ -3905,7 +4152,7 @@ asm
    pop  rdx
    pop  rcx
 
-   jmp  @Finish64Bit
+   jmp  @Finish64BIT
 @NoWaitPKG:
 
    mov  eax, cLockByteLocked
@@ -3925,7 +4172,7 @@ asm
    cmp  al, cLockByteLocked
    je   @DidntLockPause64
    pop  r9
-   jmp	@Finish64Bit
+   jmp	@Finish64BIT
 @SwitchToThreadPause64:
    push rcx
    push rdx
@@ -3941,10 +4188,10 @@ asm
    mov  eax, cLockByteLocked
    mov  r9d, cPauseSpinWaitLoopCount
    jmp  @NormalLoadLoopPause64
-@Finish64Bit:
+@Finish64BIT:
    pop  r8
 
-{$ELSE 64bit}
+{$ELSE 64BIT}
 
 // 32-bit code for AcquireSpinLockMediumBlocks
 
@@ -3964,13 +4211,13 @@ asm
    lock xchg [MediumBlocksLocked], al
    cmp  al, cLockByteLocked
    je   @DidntLockPause32
-   jmp	@Finish32Bit
+   jmp	@Finish32BIT
 @SwitchToThreadPause32:
    call SwitchToThreadIfSupported
    mov  edx, cPauseSpinWaitLoopCount
    mov  eax, cLockByteLocked
    jmp  @FirstComparePause32
-@Finish32Bit:
+@Finish32BIT:
 
 {$ENDIF}
 end;
@@ -3978,7 +4225,7 @@ end;
 
 procedure AcquireSpinLockByte(var Target: TSynchronizationVariable); assembler;
 asm
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
   {$IFDEF AllowAsmNoframe}
   .noframe
   {$ENDIF}
@@ -4126,7 +4373,57 @@ end;
 { Look for "using normal memory store" in the comment section
 at the beginning of the file for the discussion on releasing locks on data
 structures. You can also define the "InterlockedRelease" option in the
-FastMM4Options.inc file to get the old behaviour of the original FastMM4. }
+FastMM4Options.inc file to get the old behaviour of the original FastMM4.
+
+The plain store is chosen because it costs less and gives up nothing this
+unlock needs.
+
+On cost, Agner Fog puts a LOCK prefix at more than a hundred clock cycles in
+the general case, in the introduction to "Lists of instruction latencies,
+throughputs and micro-operation breakdowns", where the latency depends on cache
+organisation and may reach main memory. With the line already held in L1 the
+figure is far lower: 17.8 cycles measured on a Haswell-DT Core i5-4430 and 16.8
+on a Kaby Lake-S Core i7-7700K, against 5.0 and 5.6 on those same parts for the
+non-locking "add [mem], reg" the table uses as its baseline, at
+https://stackoverflow.com/a/44959466/6910868
+A "mov" to the lock byte is a plain store, cheaper again than that baseline,
+and it is not in that table at all.
+
+On what the lock would have bought, a correctly synchronised unlock gets
+nothing from it. No core pushes a cache line to another, so a waiting core
+learns of either release only when its own load takes the line. Nor does either
+form get ahead of the stores of the critical section: x86 keeps stores in order,
+so a plain store to the lock byte becomes visible after them, and a locked
+instruction drains the store buffer before it completes, which puts it after
+them as well. What the locked form does buy is ordering for accesses that follow
+it, which an unlock does not need, and the Linux kernel releases a spinlock with
+a plain store for the same reason, as discussed at
+https://stackoverflow.com/a/79993726/6910868
+
+DebugReleaseLockByte below is the exception, and it is a diagnostic rather than
+a correctness one. That check reads the previous value and reports a release of
+a lock that was not held. Under InterlockedRelease the read and the store are
+one operation, so of two erroneous concurrent releases exactly one sees
+cLockByteLocked and the other reports. Under the plain store they are two
+operations, so both can read cLockByteLocked before either stores and the double
+release goes unreported. A build hunting that fault is therefore worth defining
+InterlockedRelease for, which is a reason to keep the option that has nothing to
+do with the cost above.
+
+Note that InterlockedRelease presently compiles only together with PurePascal.
+The constraint belongs to the SimplifiedInterlockedExchangeByte branch below,
+which calls InterlockedExchangeByte: that function is declared only when
+UseNormalLoadBeforeAcquireLock is not, and that symbol is defined for every
+build except PurePascal, the assembler path putting AcquireLockTryNormalLoadFirst
+in its place. The other branch calls InterlockedCompareExchangeByte, which is
+declared alongside it and needs neither, so it would compile.
+
+Reaching that other branch is what cannot be done. FastMM4Options.inc defines
+SimplifiedInterlockedExchangeByte unconditionally and names
+DontUseSimplifiedInterlockedExchangeByte as the way to turn it off, but that
+option undefines UseSimplifiedInterlockedExchangeByte, which nothing tests. The
+two symbols differ by their first three letters, so the option has no effect and
+the branch it was meant to select is unreachable. }
 
 procedure ReleaseLockByte(var Target: TSynchronizationVariable);
 
@@ -4341,9 +4638,9 @@ end;
 
 {$IFDEF UseCustomFixedSizeMoveRoutines}
 
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
 
-procedure Move24Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move24Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   mov rax, [rcx + 0*8]
@@ -4362,7 +4659,7 @@ asm
   {$ENDIF}
 end;
 
-procedure Move32Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move32Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   mov rax, [rcx + 0*8]
@@ -4386,7 +4683,7 @@ asm
 end;
 
 
-procedure Move40Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move40Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   mov rax, [rcx + 0*8]
@@ -4414,7 +4711,7 @@ asm
 end;
 
 
-procedure Move48Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move48Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   mov rax, [rcx + 0*8]
@@ -4446,7 +4743,7 @@ asm
 end;
 
 
-procedure Move56Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move56Reg64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   mov rax, [rcx + 0*8]
@@ -4481,7 +4778,7 @@ asm
   {$ENDIF}
 end;
 
-{$ENDIF 64bit}
+{$ENDIF 64BIT}
 
 {$IFDEF EnableAVX}
 
@@ -4489,7 +4786,7 @@ end;
 
 {----------------------------AVX1 Move Procedures----------------------------}
 
-procedure Move24AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move24AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -4513,7 +4810,7 @@ asm
 end;
 
 
-procedure Move56AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move56AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -4541,7 +4838,7 @@ asm
   db $C5, $F8, $77           // vzeroupper
 end;
 
-procedure Move88AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move88AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -4574,7 +4871,7 @@ asm
   db $C5, $F8, $77           // vzeroupper
 end;
 
-procedure Move120AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move120AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -4619,7 +4916,7 @@ on most CPUs}
   db $C5, $F8, $77           // vzeroupper
 end;
 
-procedure Move152AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move152AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -4675,7 +4972,7 @@ less, by "add rcx", but it pays up later}
   db $C5, $F8, $77           // vzeroupper
 end;
 
-procedure Move184AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move184AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -4731,7 +5028,7 @@ be in range -127..+127, see explanation at the Move152AVX1 routine}
   db $C5, $F8, $77           // vzeroupper
 end;
 
-procedure Move216AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move216AVX1(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -4817,7 +5114,7 @@ end;
 
 {----------------------------AVX2 Move Procedures----------------------------}
 
-procedure Move24AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move24AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -4836,7 +5133,7 @@ asm
   db $C5, $F9, $EF, $C0 // vpxor xmm0,xmm0,xmm0
 end;
 
-procedure Move56AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move56AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -4860,7 +5157,7 @@ asm
   db $C5, $F1, $EF, $C9      // vpxor xmm1, xmm1, xmm1
 end;
 
-procedure Move88AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move88AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -4889,7 +5186,7 @@ asm
   db $C5, $E9, $EF, $D2      // vpxor xmm2,xmm2,xmm2
 end;
 
-procedure Move120AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move120AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -4923,7 +5220,7 @@ asm
   db $C5, $E1, $EF, $DB      // vpxor xmm3,xmm3,xmm3
 end;
 
-procedure Move152AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move152AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -4966,7 +5263,7 @@ asm
   db $C5, $D9, $EF, $E4      // vpxor xmm4,xmm4,xmm4
 end;
 
-procedure Move184AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move184AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -5014,7 +5311,7 @@ asm
   db $C5, $D1, $EF, $ED      // vpxor xmm5,xmm5,xmm5
 end;
 
-procedure Move216AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move216AVX2(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -5114,18 +5411,18 @@ procedure Move344AVX512(const ASource; var ADest; ACount: NativeInt); external;
 {$ENDIF EnableAVX512}
 
 {$ENDIF EnableAVX}
-{$ENDIF 64bit}
+{$ENDIF 64BIT}
 
 {--------------Register, FPU, MMX and SSE Move Procedures--------------}
 
 {$IFNDEF ExcludeSmallGranularMoves}
 
-procedure Move4(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move4(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   mov eax, [eax]
   mov [edx], eax
-{$ELSE 32Bit}
+{$ELSE 32BIT}
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -5136,11 +5433,11 @@ asm
   mov eax, [rdi]
   mov [rsi], eax
   {$ENDIF unix}
-{$ENDIF 32bit}
+{$ENDIF 32BIT}
 end;
 
-{$IFDEF 64Bit}
-procedure Move8(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 64BIT}
+procedure Move8(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -5154,7 +5451,7 @@ asm
 {$ENDIF}
 end;
 
-procedure Move16(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move16(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -5173,7 +5470,7 @@ asm
 end;
 
 
-procedure Move32(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move32(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   {$IFNDEF unix}
@@ -5210,11 +5507,11 @@ asm
     xorps xmm1, xmm1
 end;
 
-{$ENDIF 64bit}
+{$ENDIF 64BIT}
 
-procedure Move12(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move12(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   mov ecx, [eax]
   mov [edx], ecx
   mov ecx, [eax + 4]
@@ -5240,8 +5537,8 @@ asm
 end;
 
 
-{$IFDEF 32bit_SSE}
-procedure Move20_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move20_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -5256,11 +5553,11 @@ asm
 {$ENDIF}
   xorps xmm0, xmm0
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
-procedure Move20(const ASource; var ADest; ACount: NativeInt); assembler;{$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move20(const ASource; var ADest; ACount: NativeInt); assembler;{$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   mov ecx, [eax]
   mov [edx], ecx
   mov ecx, [eax + 4]
@@ -5304,14 +5601,14 @@ asm
   {$ENDIF}
 {$ENDIF}
   xorps xmm0, xmm0
-{$ENDIF 32Bit}
+{$ENDIF 32BIT}
 end;
 
 {$ENDIF ExcludeSmallGranularMoves}
 
 {$IFNDEF PurePascal}
-{$IFDEF 64bit}
-procedure Move24(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 64BIT}
+procedure Move24(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 
 {$IFDEF AlignAtLeast16Bytes}
@@ -5347,13 +5644,13 @@ asm
 {$ENDIF}
   xorps xmm0, xmm0
 end;
-{$ENDIF 64bit}
+{$ENDIF 64BIT}
 {$ENDIF PurePascal}
 
 {$IFNDEF ExcludeSmallGranularMoves}
 
-{$IFDEF 32bit_SSE}
-procedure Move28_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler;{$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move28_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler;{$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -5369,11 +5666,11 @@ asm
   xorps xmm0, xmm0
   xorps xmm1, xmm1
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
-procedure Move28(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move28(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   mov ecx, [eax]
   mov [edx], ecx
   mov ecx, [eax + 4]
@@ -5433,8 +5730,8 @@ asm
 {$ENDIF}
 end;
 
-{$IFDEF 32bit_SSE}
-procedure Move36_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move36_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -5454,11 +5751,11 @@ asm
   xorps xmm0, xmm0
   xorps xmm1, xmm1
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
-procedure Move36(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move36(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {Fixed pleriche/FastMM4 Issue #85: Replaced FPU-based copy with rep movsd.
    The previous fild/fistp sequence could cause FPU stack overflow if callers
    violated ABI by leaving values on FPU stack. rep movsd avoids FPU entirely,
@@ -5519,8 +5816,8 @@ asm
 {$ENDIF}
 end;
 
-{$IFDEF 64bit}
-procedure Move40(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 64BIT}
+procedure Move40(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   {$IFNDEF unix}
@@ -5565,7 +5862,7 @@ asm
   xorps xmm1, xmm1
 end;
 
-procedure Move48(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move48(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   {$IFNDEF unix}
@@ -5614,8 +5911,8 @@ end;
 
 {$ENDIF}
 
-{$IFDEF 32bit_SSE}
-procedure Move44_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move44_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -5636,11 +5933,11 @@ asm
   xorps xmm1, xmm1
   xorps xmm2, xmm2
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
-procedure Move44(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move44(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {Fixed pleriche/FastMM4 Issue #85 - see Move36 for explanation}
   push esi
   push edi
@@ -5706,8 +6003,8 @@ asm
 end;
 
 
-{$IFDEF 32bit_SSE}
-procedure Move52_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move52_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -5732,11 +6029,11 @@ asm
   xorps xmm1, xmm1
   xorps xmm2, xmm2
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
-procedure Move52(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move52(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {Fixed pleriche/FastMM4 Issue #85 - see Move36 for explanation}
   push esi
   push edi
@@ -5804,8 +6101,8 @@ end;
 {$ENDIF ExcludeSmallGranularMoves}
 
 {$IFNDEF PurePascal}
-{$IFDEF 64bit}
-procedure Move56(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 64BIT}
+procedure Move56(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   {$IFNDEF unix}
@@ -5860,7 +6157,7 @@ asm
 end;
 
 
-procedure Move64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move64(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   {$IFNDEF unix}
@@ -5914,15 +6211,15 @@ asm
   xorps xmm2, xmm2
   xorps xmm3, xmm3
 end;
-{$ENDIF 64bit}
+{$ENDIF 64BIT}
 {$ENDIF PurePascal}
 
 
 
 {$IFNDEF ExcludeSmallGranularMoves}
 
-{$IFDEF 32bit_SSE}
-procedure Move60_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move60_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -5948,11 +6245,11 @@ asm
   xorps xmm2, xmm2
   xorps xmm3, xmm3
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
-procedure Move60(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move60(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {Fixed pleriche/FastMM4 Issue #85 - see Move36 for explanation}
   push esi
   push edi
@@ -6025,8 +6322,8 @@ asm
 {$ENDIF}
 end;
 
-{$IFDEF 32bit_SSE}
-procedure Move68_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move68_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -6056,11 +6353,11 @@ asm
   xorps xmm2, xmm2
   xorps xmm3, xmm3
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
-procedure Move68(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure Move68(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {Fixed pleriche/FastMM4 Issue #85 - see Move36 for explanation}
   push esi
   push edi
@@ -6071,7 +6368,7 @@ asm
   rep movsd
   pop edi
   pop esi
-{$ELSE 32Bit}
+{$ELSE 32BIT}
 {$IFDEF AlignAtLeast16Bytes}
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -6131,11 +6428,11 @@ asm
   xorps xmm1, xmm1
   xorps xmm2, xmm2
   xorps xmm3, xmm3
-{$ENDIF 32Bit}
+{$ENDIF 32BIT}
 end;
 
-{$IFDEF 32bit_SSE}
-procedure Move76_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move76_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -6166,10 +6463,10 @@ asm
   xorps xmm3, xmm3
   xorps xmm4, xmm4
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
-{$IFDEF 32bit_SSE}
-procedure Move84_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move84_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -6204,11 +6501,11 @@ asm
   xorps xmm3, xmm3
   xorps xmm4, xmm4
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
 
-{$IFDEF 32bit_SSE}
-procedure Move92_32bit_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF 32BIT_SSE}
+procedure Move92_32BIT_SSE(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
 {$IFDEF AlignAtLeast16Bytes}
   movaps xmm0, [eax]
@@ -6244,7 +6541,7 @@ asm
   xorps xmm4, xmm4
   xorps xmm5, xmm5
 end;
-{$ENDIF 32bit_SSE}
+{$ENDIF 32BIT_SSE}
 
 {$ENDIF ExcludeSmallGranularMoves}
 
@@ -6257,9 +6554,9 @@ procedure MoveWithErmsNoAVX(const ASource; var ADest; ACount: NativeInt); forwar
  SizeOf(Pointer). Important note: Always moves at least 16 - SizeOf(Pointer)
  bytes (the minimum small block size with 16 byte alignment), irrespective of
  ACount.}
-procedure MoveX16LP(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit}  nostackframe; {$ENDIF}
+procedure MoveX16LP(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT}  nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   test FastMMCpuFeaturesA, FastMMCpuFeatureERMS
   jz @NoERMS
   call MoveWithErmsNoAVX
@@ -6347,7 +6644,7 @@ asm
   pop esi
   jmp @Finish
 {$ENDIF ForceMMX}
-{$ELSE 32bit}
+{$ELSE 32BIT}
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -6416,7 +6713,7 @@ asm
   mov rcx, [rdi + rdx]
   mov [rsi + rdx], rcx
   {$ENDIF unix}
-{$ENDIF 32bit}
+{$ENDIF 32BIT}
 @Finish:
 end;
 
@@ -6428,7 +6725,7 @@ end;
 
 {$IFDEF EnableAVX}
 
-procedure MoveX32LpAvx1NoErms(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit}  nostackframe; {$ENDIF}
+procedure MoveX32LpAvx1NoErms(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT}  nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -6492,7 +6789,7 @@ asm
 @exit:
 end;
 
-procedure MoveX32LpAvx2NoErms(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit}  nostackframe; {$ENDIF}
+procedure MoveX32LpAvx2NoErms(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT}  nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -6555,11 +6852,12 @@ end;
 {$IFDEF EnableERMS}
 
 // According to the Intel Optimization Reference Manual (Section 3.7.6.2, Memcpy Considerations), rep movsb outperforms AVX copy on blocks of 2048 bytes and above
+// No source/destination distance check guards the rep movsb these routines select, because FastMM only calls them for a reallocation copy between two separately allocated blocks, which never overlap; a forward copy whose destination lies 1 to 63 bytes below the source is pathologically slow on some CPUs with Fast Short REP MOVSB (FSRM), such as Ice Lake, Tiger Lake and the Alder Lake P-core, which is why glibc, on Intel CPUs with FSRM, and the MSVC v14.50 CRT, on every CPU, test the distance in memmove, see https://stackoverflow.com/a/79996071/6910868
 
 const
   cLeastErmsAdvantageLengh = 2048;
 
-procedure MoveX32LpAvx1WithErms(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure MoveX32LpAvx1WithErms(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -6646,7 +6944,7 @@ asm
 @exit:
 end;
 
-procedure MoveX32LpAvx2WithErms(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure MoveX32LpAvx2WithErms(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
@@ -6739,7 +7037,28 @@ end;
 (see "Intel 64 and IA-32 Architectures Optimization Reference Manual,"
 Section 3.7.7, "Enhanced REP MOVSB and STOSB operation (ERMSB)").
 We first check the corresponding bit in the CPUID, and if it is supported,
-call this routine.}
+call this routine.
+
+The two constants below choose a destination aligned by 64 bytes, one cache
+line, and a length taken down to a multiple of 64 before the transfer. The
+64-byte figure is this implementation's choice rather than a value the
+measurements ask for: the Intel manual reports that a misaligned destination
+costs an ERMSB copy up to 25 per cent against the 16-byte aligned case, where a
+128-bit AVX copy loses only 5 per cent, so alignment is worth the head copy
+that buys it, but those measurements distinguish a misaligned destination from
+a 16-byte aligned one and do not compare 16 against 64, see
+https://stackoverflow.com/a/43837564/6910868
+
+The rep movsb below runs without a source/destination distance check, where
+glibc, on Intel CPUs with Fast Short REP MOVSB (FSRM), and the MSVC v14.50
+CRT, on every CPU, refuse rep movsb in memmove when a forward copy's
+destination lies 1 to 63 bytes below the source, because that close forward
+overlap is pathologically slow on some FSRM CPUs, such as Ice Lake, Tiger
+Lake and the Alder Lake P-core, see
+https://stackoverflow.com/a/79996071/6910868
+for the measurements and both library fixes. FastMM needs no such check:
+this routine is only called for a reallocation copy between two separately
+allocated blocks, so the source and destination never overlap. }
 
 const
   cAlignErmsDestinationBits = 6;
@@ -6752,9 +7071,9 @@ const
 
   cRepMovsSmallBlock = Cardinal(cRoundErmsBlockSizeBoundary) * 3;
 
-procedure MoveWithErmsNoAVX(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure MoveWithErmsNoAVX(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
 // Under 32-bit Windows or Unix, the call passes first parameter in EAX, second in EDX, third in ECX
 
   push    ebx
@@ -6814,7 +7133,7 @@ asm
   cmp     ecx, 8
   jb      @below8left
 
-{$IFDEF 32bit_SSE}
+{$IFDEF 32BIT_SSE}
   cmp     ecx, 32
   jb      @below32left
 
@@ -6958,8 +7277,22 @@ asm
 
 {$IFNDEF fpc}
 {$IFDEF EnableFSRM}
-  // moves of 64 bytes or less are good only when we have fast short strings on 64 bit,
-  // but not on 32 bit
+  // Blocks of 65 up to cRepMovsSmallBlock bytes reach this test, and rep movsb
+  // is worth taking for them only where Fast Short REP MOV has removed the
+  // startup cost that the rep prefix otherwise pays. The rep prefix pays that
+  // cost on both architectures; what is 64-bit specific is Fast Short REP MOV
+  // being effective, which is why the 32-bit routine above makes no such test
+  // and records that fast short strings do not work there, at least on Ice Lake.
+  // Blocks of 64 bytes or less never arrive here at all: @SmallBlock above sent
+  // those straight to @Left64OrLess, so the test cannot decide anything about
+  // them.
+  // The size of the startup cost is what makes the Fast Short REP MOV test
+  // below worth its own branch. Intel gives the figures for Nehalem, where
+  // rep movsb starts at 50 cycles for a string longer than nine bytes, and
+  // rep movsw, rep movsd and rep movsq start at 35 to 40 cycles, so at these
+  // lengths the setup dominates the copy. Later processor generations may
+  // differ, and the figures are quoted here for the size of the effect rather
+  // than as constants. See https://stackoverflow.com/a/45123049/6910868
   push    rsi
   push    rdi
   call    GetFastMMCpuFeaturesA
@@ -7016,7 +7349,7 @@ end;
 {$ENDIF EnableERMS}
 
 
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
 {$IFDEF EnableAVX512}
 {$IFNDEF DisableMoveX32LpAvx512}
 {$IFDEF unix}
@@ -7061,7 +7394,7 @@ begin
     {$IFDEF EnableERMS}
     if (F and FastMMCpuFeatureERMS) <> 0 then
     begin
-      {$IFDEF 64bit}
+      {$IFDEF 64BIT}
       {$IFDEF EnableAVX512}
       {$IFNDEF DisableMoveX32LpAvx512}
       if (F and FastMMCpuFeatureAVX512) <> 0 then
@@ -7115,9 +7448,9 @@ end;
  SizeOf(Pointer). Important note: Always moves at least 8 - SizeOf(Pointer)
  bytes (the minimum small block size with 8 byte alignment), irrespective of
  ACount.}
-procedure MoveX8LP(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64bit}  nostackframe; {$ENDIF}
+procedure MoveX8LP(const ASource; var ADest; ACount: NativeInt); assembler; {$IFDEF fpc64BIT}  nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   test FastMMCpuFeaturesA, FastMMCpuFeatureERMS
   jz @NoERMS
   call MoveWithErmsNoAVX
@@ -7260,12 +7593,12 @@ begin
 end;
 
 {$IFNDEF MACOS}
-function VirtualAlloc(lpvAddress: Pointer; dwSize, flAllocationType, flProtect: Cardinal): Pointer; stdcall;
+function VirtualAlloc(lpvAddress: Pointer; dwSize: NativeUInt; flAllocationType, flProtect: Cardinal): Pointer; stdcall;
 begin
   Result := valloc(dwSize);
 end;
 
-function VirtualFree(lpAddress: Pointer; dwSize, dwFreeType: Cardinal): LongBool; stdcall;
+function VirtualFree(lpAddress: Pointer; dwSize: NativeUInt; dwFreeType: Cardinal): LongBool; stdcall;
 begin
   free(lpAddress);
   Result := True;
@@ -7317,9 +7650,9 @@ end;
 
 {Fills a block of memory with the given dword (32-bit) or qword (64-bit).
  Always fills a multiple of SizeOf(Pointer) bytes}
-procedure DebugFillMem(var AAddress; AByteCount: NativeInt; AFillValue: NativeUInt); assembler; {$IFDEF fpc64bit} nostackframe; {$ENDIF}
+procedure DebugFillMem(var AAddress; AByteCount: NativeInt; AFillValue: NativeUInt); assembler; {$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {On Entry:
    eax = AAddress
    edx = AByteCount
@@ -7333,7 +7666,7 @@ asm
   add edx, 4
   js @FillLoop
 @Done:
-{$ELSE 32Bit}
+{$ELSE 32BIT}
   {$IFNDEF unix}
 
   {$IFDEF AllowAsmNoframe}
@@ -7368,7 +7701,7 @@ asm
   js @FillLoop
 @Done:
   {$ENDIF unix}
-{$ENDIF 32Bit}
+{$ENDIF 32BIT}
 end;
 {$ENDIF}
 
@@ -7409,9 +7742,9 @@ var
 
   {Handle to the FullDebugMode DLL}
   FullDebugModeDLL: HMODULE;
-  {$IF Defined( FullDebugMode ) AND Defined( LoadDebugDLLDynamically ) AND Defined( MemoryLoadLibrarySupport )}
+  {$IFDEF FullDebugMode}{$IFDEF LoadDebugDLLDynamically}{$IFDEF MemoryLoadLibrarySupport}
   FullDebugModeRDLL: PMemoryModule;
-  {$IFEND}
+  {$ENDIF}{$ENDIF}{$ENDIF}
 
   GetStackTrace: procedure (AReturnAddresses: PNativeUInt;
     AMaxDepth, ASkipFrames: Cardinal) = NoOpGetStackTrace;
@@ -7453,13 +7786,13 @@ end;
   ANum - the NativeUInt value to convert ;
   APBuffer - output buffer;
   ABufferLengthChars - the size of the output buffer in characters (not in bytes);
-                       since currently one char is one byte, the maxiumum lenght
+                       since currently one char is one byte, the maximum length
                        of the buffer in characters is the same as the size of the
-                       buffer in bytes, but if we switch to double-byte charaters
+                       buffer in bytes, but if we switch to double-byte characters
                        in future (e.g. UTF-16), this will differ}
 
 function NativeUIntToStrBuf(ANum: NativeUInt; APBuffer: PAnsiChar; ABufferLengthChars: Cardinal): PAnsiChar;
-{$IFNDEF Use32BitAsm}
+{$IFNDEF Use32BITAsm}
 const
   MaxDigits = 20;
 var
@@ -7501,7 +7834,7 @@ asm
   {Calculate leading digit: divide the number by 1e9}
   add eax, 1                  //Increment the number
   mov edx, $89705F41          //1e9 reciprocal
-  mul edx                     //Multplying with reciprocal
+  mul edx                     //Multiplying with reciprocal
   shr eax, 30                 //Save fraction bits
   mov ecx, edx                //First digit in bits <31:29>
   and edx, $1FFFFFFF          //Filter fraction part edx<28:0>
@@ -7607,7 +7940,7 @@ end;
 {Converts an unsigned integer to a hexadecimal string at the buffer location,
  returning the new buffer position.}
 function NativeUIntToHexBuf(ANum: NativeUInt; APBuffer: PAnsiChar; ABufferLengthChars: Cardinal): PAnsiChar;
-{$IFNDEF Use32BitAsm}
+{$IFNDEF Use32BITAsm}
 const
   MaxDigits = 16;
 var
@@ -8012,7 +8345,7 @@ end;
 
 
 
-{$IFDEF Use32BitAsm}
+{$IFDEF Use32BITAsm}
   {$IFNDEF MediumBlocksLockedCriticalSection}
     {$define UseOriginalFastMM4_LockMediumBlocksAsm}
   {$ENDIF}
@@ -8120,7 +8453,7 @@ loop of Sleep() or SwitchToThread() as opposing to an efficient approach of Fast
 
 procedure LockMediumBlocks;
 asm
-{ This implemenation will not be compiled into FastMM4-AVX unless you
+{ This implementation will not be compiled into FastMM4-AVX unless you
   undefine the MediumBlocksLockedCriticalSection. You may only need
   this implementation if you would like to use the old locking mechanism of
   the original FastMM4 }
@@ -8195,6 +8528,19 @@ end;
 
 
 
+{$IFNDEF BCB6OrDelphi7AndUp}
+{On Delphi 4 through 6 the assembler error paths below cannot reference
+ System.RunError directly - the assembler rejects the call with "Invalid
+ combination of opcode and operands" - and System.Error only exists from
+ Delphi 7 and C++Builder 6, so those paths call this wrapper instead. It is
+ compiled for FreePascal too, which also lacks BCB6OrDelphi7AndUp and still
+ assembles the 32-bit error paths that call it.}
+procedure RunErrorInvalidPtr;
+begin
+  System.RunError(Ord(reInvalidPtr));
+end;
+{$ENDIF}
+
 {Removes a medium block from the circular linked list of free blocks.
  Does not change any header flags. Medium blocks should be locked
  before calling this procedure.}
@@ -8218,25 +8564,45 @@ begin
    equal, they must point to the bin.}
   if LPreviousFreeBlock = LNextFreeBlock then
   begin
-    {Get the bin number for this block size}
-    LBinNumber := (UIntPtr(LNextFreeBlock) - UIntPtr(@MediumBlockBins)) shr MediumFreeBlockSizePowerOf2;
-    LBinGroupNumber := LBinNumber shr MediumBlockBinsPerGroupPowerOf2;
-    {Flag this bin as empty}
-    LShift := LBinNumber and (MediumBlockBinsPerGroup-1);
-    LMask := not (Cardinal(UnsignedBit) shl LShift);
-    MediumBlockBinBitmaps[LBinGroupNumber] := MediumBlockBinBitmaps[LBinGroupNumber] and LMask;
-    {Is the group now entirely empty?}
-    if MediumBlockBinBitmaps[LBinGroupNumber] = 0 then
+    {Guard: verify the bin pointer is within the MediumBlockBins array
+     and aligned to a bin boundary to prevent unsigned underflow in the
+     subtraction below and wrong-bin bitmap corruption (issue #39).}
+    if (UIntPtr(LNextFreeBlock) >= UIntPtr(@MediumBlockBins[0])) and
+       (UIntPtr(LNextFreeBlock) <= UIntPtr(@MediumBlockBins[MediumBlockBinCount - 1])) and
+       ((UIntPtr(LNextFreeBlock) - UIntPtr(@MediumBlockBins[0])) and ((1 shl MediumFreeBlockSizePowerOf2) - 1) = 0) then
     begin
-      LMask := not (Cardinal(UnsignedBit) shl LBinGroupNumber);
+      {Get the bin number for this block size}
+      LBinNumber := (UIntPtr(LNextFreeBlock) - UIntPtr(@MediumBlockBins)) shr MediumFreeBlockSizePowerOf2;
+      LBinGroupNumber := LBinNumber shr MediumBlockBinsPerGroupPowerOf2;
+      {Flag this bin as empty}
+      LShift := LBinNumber and (MediumBlockBinsPerGroup-1);
+      LMask := not (Cardinal(UnsignedBit) shl LShift);
+      MediumBlockBinBitmaps[LBinGroupNumber] := MediumBlockBinBitmaps[LBinGroupNumber] and LMask;
+      {Is the group now entirely empty?}
+      if MediumBlockBinBitmaps[LBinGroupNumber] = 0 then
+      begin
+        LMask := not (Cardinal(UnsignedBit) shl LBinGroupNumber);
 
-      {Flag this group as empty}
-      MediumBlockBinGroupBitmap := MediumBlockBinGroupBitmap and LMask;
-    end;
+        {Flag this group as empty}
+        MediumBlockBinGroupBitmap := MediumBlockBinGroupBitmap and LMask;
+      end;
+    end
+{$IFNDEF SoftInvalidFreeMem}
+    else
+    begin
+      {Corrupt free list: bin pointer outside MediumBlockBins array (issue #39)}
+      {$IFDEF BCB6OrDelphi7AndUp}
+      System.Error(reInvalidPtr);
+      {$ELSE}
+      System.RunError(reInvalidPtr);
+      {$ENDIF}
+    end
+{$ENDIF}
+    ;
   end;
 end;
 {$ELSE}
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
 assembler;
 asm
   {On entry: eax = APMediumFreeBlock}
@@ -8257,8 +8623,28 @@ asm
   jmp @Exit
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @BinIsNowEmpty:
+  {Guard: validate ecx (bin pointer) is within MediumBlockBins array (issue #39)}
+  cmp ecx, offset MediumBlockBins
+{$IFDEF SoftInvalidFreeMem}
+  jb @Done
+{$ELSE}
+  jb @CorruptBinPointer
+{$ENDIF}
+  cmp ecx, offset MediumBlockBins + (MediumBlockBinCount - 1) * (1 shl MediumFreeBlockSizePowerOf2)
+{$IFDEF SoftInvalidFreeMem}
+  ja @Done
+{$ELSE}
+  ja @CorruptBinPointer
+{$ENDIF}
   {Get the bin number for this block size in ecx}
   sub ecx, offset MediumBlockBins
+  {Check alignment to bin size boundary (issue #39)}
+  test ecx, (1 shl MediumFreeBlockSizePowerOf2) - 1
+{$IFDEF SoftInvalidFreeMem}
+  jnz @Done
+{$ELSE}
+  jnz @CorruptBinPointer
+{$ENDIF}
   mov edx, ecx
   shr ecx, MediumFreeBlockSizePowerOf2
   {Get the group number in edx}
@@ -8273,6 +8659,18 @@ asm
   mov ecx, edx
   rol eax, cl
   and MediumBlockBinGroupBitmap, eax
+  jmp @Exit
+{$IFNDEF SoftInvalidFreeMem}
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@CorruptBinPointer:
+  {Corrupt free list: bin pointer outside MediumBlockBins array (issue #39)}
+  mov eax, reInvalidPtr
+  {$IFDEF BCB6OrDelphi7AndUp}
+  call System.Error
+  {$ELSE}
+  call RunErrorInvalidPtr
+  {$ENDIF}
+{$ENDIF}
 @Exit:
 end;
 {$ELSE}
@@ -8295,9 +8693,30 @@ asm
   {Is this bin now empty? If the previous and next free block pointers are
    equal, they must point to the bin.}
   jne @Done
-  {Get the bin number for this block size in rcx}
+  {Guard: validate rcx (bin pointer) is within MediumBlockBins array (issue #39)}
   lea r8, MediumBlockBins
+  cmp rcx, r8
+{$IFDEF SoftInvalidFreeMem}
+  jb @Done
+{$ELSE}
+  jb @CorruptBinPointer
+{$ENDIF}
+  lea r9, [r8 + (MediumBlockBinCount - 1) * (1 shl MediumFreeBlockSizePowerOf2)]
+  cmp rcx, r9
+{$IFDEF SoftInvalidFreeMem}
+  ja @Done
+{$ELSE}
+  ja @CorruptBinPointer
+{$ENDIF}
+  {Get the bin number for this block size in rcx}
   sub rcx, r8
+  {Check alignment to bin size boundary (issue #39)}
+  test ecx, (1 shl MediumFreeBlockSizePowerOf2) - 1
+{$IFDEF SoftInvalidFreeMem}
+  jnz @Done
+{$ELSE}
+  jnz @CorruptBinPointer
+{$ENDIF}
   mov edx, ecx
   shr ecx, MediumFreeBlockSizePowerOf2
   {Get the group number in edx}
@@ -8313,6 +8732,18 @@ asm
   mov ecx, edx
   rol eax, cl
   and MediumBlockBinGroupBitmap, eax
+{$IFNDEF SoftInvalidFreeMem}
+  jmp @Done
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@CorruptBinPointer:
+  {Corrupt free list: bin pointer outside MediumBlockBins array (issue #39)}
+  mov ecx, reInvalidPtr
+  {$IFDEF BCB6OrDelphi7AndUp}
+  call System.Error
+  {$ELSE}
+  call RunErrorInvalidPtr
+  {$ENDIF}
+{$ENDIF}
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 2{$ENDIF}
 @Done:
 end;
@@ -8330,6 +8761,20 @@ var
   LPBin,
   LPFirstFreeBlock: PMediumFreeBlock;
 begin
+  {Guard against unsigned underflow: a block smaller than the minimum
+   medium block size would wrap around in the subtraction below (issue #39).}
+  if AMediumBlockSize < MinimumMediumBlockSize then
+  begin
+    {$IFDEF SoftInvalidFreeMem}
+    Exit;
+    {$ELSE}
+    {$IFNDEF SystemRunError}
+    System.Error(reInvalidOp);
+    {$ELSE}
+    System.RunError(reInvalidOp);
+    {$ENDIF}
+    {$ENDIF}
+  end;
   {Get the bin number for this block size. Get the bin that holds blocks of at
    least this size.}
   LBinNumber := (AMediumBlockSize - MinimumMediumBlockSize) shr MediumBlockGranularityPowerOf2;
@@ -8358,7 +8803,7 @@ begin
   end;
 end;
 {$ELSE}
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
 assembler;
 asm
   {On entry: eax = APMediumFreeBlock, edx = AMediumBlockSize}
@@ -8515,7 +8960,7 @@ begin
   end;
 end;
 {$ELSE}
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
 assembler;
 asm
   cmp MediumSequentialFeedBytesLeft, 0
@@ -8589,7 +9034,7 @@ asm
   .params 2
   {$ENDIF}
   xor eax, eax
-  cmp MediumSequentialFeedBytesLeft, eax
+  cmp MediumSequentialFeedBytesLeft, rax
   je @Done
   {Get a pointer to the last sequentially allocated medium block}
   mov rax, LastSequentiallyFedMediumBlock
@@ -8598,20 +9043,20 @@ asm
   jnz @LastBlockFedIsFree
   {Set the "previous block is free" flag in the last block fed}
   or qword ptr [rax - BlockHeaderSize], PreviousMediumBlockIsFreeFlag
-  {Get the remainder in edx}
-  mov edx, MediumSequentialFeedBytesLeft
-  {Point eax to the start of the remainder}
+  {Get the remainder in rdx}
+  mov rdx, MediumSequentialFeedBytesLeft
+  {Point rax to the start of the remainder}
   sub rax, rdx
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @BinTheRemainder:
-  {Status: rax = start of remainder, edx = size of remainder}
+  {Status: rax = start of remainder, rdx = size of remainder}
   {Store the size of the block as well as the flags}
   lea rcx, [rdx + IsMediumBlockFlag + IsFreeBlockFlag]
   mov [rax - BlockHeaderSize], rcx
   {Store the trailing size marker}
   mov [rax + rdx - 2 * BlockHeaderSize], rdx
   {Bin this medium block}
-  cmp edx, MinimumMediumBlockSize
+  cmp rdx, MinimumMediumBlockSize
   jb @Done
   mov rcx, rax
   call InsertMediumBlockIntoBin
@@ -8622,7 +9067,7 @@ asm
   mov rdx, DropMediumAndLargeFlagsMask
   and rdx, [rax - BlockHeaderSize]
   {Free the last block fed}
-  cmp edx, MinimumMediumBlockSize
+  cmp rdx, MinimumMediumBlockSize
   jb @DontRemoveLastFed
   {Last fed block is free - remove it from its size bin}
   mov rcx, rax
@@ -8633,12 +9078,12 @@ asm
   and rdx, [rax - BlockHeaderSize]
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @DontRemoveLastFed:
-  {Get the number of bytes left in ecx}
-  mov ecx, MediumSequentialFeedBytesLeft
+  {Get the number of bytes left in rcx}
+  mov rcx, MediumSequentialFeedBytesLeft
   {Point rax to the start of the remainder}
   sub rax, rcx
-  {edx = total size of the remainder}
-  add edx, ecx
+  {rdx = total size of the remainder}
+  add rdx, rcx
   jmp @BinTheRemainder
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 2{$ENDIF}
 @Done:
@@ -8817,8 +9262,20 @@ begin
   {Pad the block size to include the header and granularity. We also add a
    SizeOf(Pointer) overhead so a huge block size is a multiple of 16 bytes less
    SizeOf(Pointer) (so we can use a single move function for reallocating all
-   block types)}
-  LLargeUsedBlockSize := (ASize + LargeBlockHeaderSize + LargeBlockGranularity - 1 + BlockHeaderSize)
+   block types)
+
+   Each constant is added as NativeUInt. They are untyped integer constants, and
+   FreePascal widens the whole expression to int64 to hold them, so on 64-bit a
+   size at or above 2^63 overflows that signed intermediate rather than the
+   unsigned type the size actually has. The guard above does not stop it, since
+   MaxSafeLargeBlockSize sits only 2 MB below the top of the range and passes
+   almost the whole upper half through. Unchecked the wrap was invisible because
+   the mask discarded it; with overflow checking on, which the unit inherits from
+   the program compiling it, it terminated the process from inside the allocator
+   instead of returning nil. Written in NativeUInt the arithmetic is exact, and
+   no size the guard admits can carry it past the top.}
+  LLargeUsedBlockSize := (ASize + NativeUInt(LargeBlockHeaderSize)
+      + NativeUInt(LargeBlockGranularity) - 1 + NativeUInt(BlockHeaderSize))
     and LargeBlockGranularityMask;
   {Get the Large block}
   Result := VirtualAlloc(nil, LLargeUsedBlockSize, MEM_COMMIT or MEM_TOP_DOWN,
@@ -9037,8 +9494,12 @@ begin
      logical to assume that it may be enlarged again. Since reallocations are
      expensive, there is a minimum upsize percentage to avoid unnecessary
      future move operations.}
-    {Add 25% for large block upsizes}
-    LMinimumUpsize := LOldAvailableSize + (LOldAvailableSize shr 2);
+    {Add 25% for large block upsizes. Check before adding to avoid
+     unsigned overflow with corrupt large block headers.}
+    if LOldAvailableSize <= High(NativeUInt) - (LOldAvailableSize shr 2) then
+      LMinimumUpsize := LOldAvailableSize + (LOldAvailableSize shr 2)
+    else
+      LMinimumUpsize := ANewSize;
     if ANewSize < LMinimumUpsize then
       LNewAllocSize := LMinimumUpsize
     else
@@ -9154,7 +9615,7 @@ end;
 
 {This function is only needed to cope with an error that happens at runtime
 when using the "typed @ operator" compiler option. We are having just
-one typecast in this function to avoid using typecasts throught the
+one typecast in this function to avoid using typecasts throughout the
 entire FastMM4 module.}
 
 function NegCardinalMaskBit(A: Cardinal): Cardinal;
@@ -9165,7 +9626,7 @@ end;
 {$ELSE}
 assembler;
 asm
-{$IFDEF 32bit}
+{$IFDEF 32BIT}
         neg     eax
 {$ELSE}
    {$IFDEF unix}
@@ -9193,7 +9654,7 @@ end;
 {$ELSE}
 assembler;
 asm
-{$IFDEF 32bit}
+{$IFDEF 32BIT}
         neg     al
 {$ELSE}
    {$IFDEF unix}
@@ -9217,7 +9678,7 @@ end;
 {$ELSE}
 assembler;
 asm
-{$IFDEF 32bit}
+{$IFDEF 32BIT}
         neg     eax
 {$ELSE}
    {$IFDEF unix}
@@ -9280,9 +9741,9 @@ begin
 end;
 {$ELSE ASMVersion}
 assembler;
-{$IFDEF fpc64bit} nostackframe; {$ENDIF}
+{$IFDEF fpc64BIT} nostackframe; {$ENDIF}
 asm
-{$IFDEF 64Bit}
+{$IFDEF 64BIT}
   {$IFNDEF unix}
   {$IFDEF AllowAsmNoframe}
   .noframe
@@ -9399,9 +9860,6 @@ var
   LMask: Cardinal;
 begin
 
-  LMediumBlocksLocked := False;
-  LSmallBlockWithoutLock := False;
-
 {$IFNDEF AssumeMultiThreaded}
   LWasMultiThread := False;
 {$ENDIF}
@@ -9451,6 +9909,7 @@ begin
       {$IFNDEF AssumeMultiThreaded}
       LWasMultiThread := True;
       {$ENDIF}
+      LSmallBlockWithoutLock := False;
       while True do
       begin
         {Try to lock the small block type (0)}
@@ -9578,6 +10037,7 @@ begin
       begin
         {Need to allocate a pool: Lock the medium blocks}
         {$IFNDEF AssumeMultiThreaded}
+        LMediumBlocksLocked := False;
         if IsMultiThread then
         {$ENDIF}
         begin
@@ -9611,7 +10071,7 @@ begin
           {Is this bin now empty?}
           if LNextFreeBlock = LPMediumBin then
           begin
-            LShift := LBinNumber and (MediumBlockBinsPerGroup-1);
+            LShift := Byte(LBinNumber and (MediumBlockBinsPerGroup-1));
             LMask := not (Cardinal(UnsignedBit) shl LShift);
             {Flag this bin as empty}
             MediumBlockBinBitmaps[LBinGroupNumber] := MediumBlockBinBitmaps[LBinGroupNumber] and LMask;
@@ -9698,22 +10158,17 @@ begin
                 {Unlock the medium blocks}
                 if LMediumBlocksLocked then
                 begin
-                  LMediumBlocksLocked := False;
                   UnlockMediumBlocks;
                 end;
                 {Unlock the block type}
                 if not LSmallBlockWithoutLock then
                 begin
                   ReleaseLockByte(LPSmallBlockType^.SmallBlockTypeLocked);
-                end else
-                begin
-                  LSmallBlockWithoutLock := False;
                 end;
                 {$IFDEF SmallBlocksLockedCriticalSection}
                 if LSmallBlockCriticalSectionIndex <> NativeUInt(MaxInt) then
                 begin
                   LeaveCriticalSection(SmallBlockCriticalSections[LSmallBlockCriticalSectionIndex]);
-                  LSmallBlockCriticalSectionIndex := NativeUInt(MaxInt);
                 end;
                 {$ENDIF}
               end;
@@ -9734,7 +10189,6 @@ begin
         begin
           if LMediumBlocksLocked then
           begin
-            LMediumBlocksLocked := False;
             UnlockMediumBlocks;
           end;
         end;
@@ -9770,15 +10224,11 @@ begin
       if not LSmallBlockWithoutLock then
       begin
         ReleaseLockByte(LPSmallBlockType^.SmallBlockTypeLocked);
-      end else
-      begin
-        LSmallBlockWithoutLock := False;
       end;
       {$IFDEF SmallBlocksLockedCriticalSection}
       if LSmallBlockCriticalSectionIndex <> NativeUInt(MaxInt) then
       begin
         LeaveCriticalSection(SmallBlockCriticalSections[LSmallBlockCriticalSectionIndex]);
-        LSmallBlockCriticalSectionIndex := NativeUInt(MaxInt);
       end;
       {$ENDIF}
     end;
@@ -9797,6 +10247,7 @@ begin
       LBinNumber := (LBlockSize - MinimumMediumBlockSize) shr MediumBlockGranularityPowerOf2;
       {Lock the medium blocks}
 {$IFNDEF AssumeMultiThreaded}
+      LMediumBlocksLocked := False;
       if IsMultiThread then
 {$ENDIF}
       begin
@@ -9815,7 +10266,7 @@ begin
 
       {Calculate the bin group}
       LBinGroupNumber := LBinNumber shr MediumBlockBinsPerGroupPowerOf2;
-      LShift := LBinNumber and (MediumBlockBinsPerGroup-1);
+      LShift := Byte(LBinNumber and (MediumBlockBinsPerGroup-1));
       {Is there a suitable block inside this group?}
       LBinGroupMasked := MediumBlockBinBitmaps[LBinGroupNumber] and NegCardinalMaskBit(Cardinal(UnsignedBit) shl LShift);
       if LBinGroupMasked <> 0 then
@@ -9883,7 +10334,6 @@ begin
           begin
             if LMediumBlocksLocked then
             begin
-              LMediumBlocksLocked := False;
               UnlockMediumBlocks;
             end;
           end;
@@ -9978,7 +10428,6 @@ begin
         if LMediumBlocksLocked then
         begin
           {Unlock the medium blocks}
-          LMediumBlocksLocked := False;
           UnlockMediumBlocks;
         end;
       end;
@@ -10017,7 +10466,7 @@ end;
   function FastGetMemAssembler(ASize: {$IFDEF XE2AndUp}NativeInt{$ELSE}{$IFDEF fpc}NativeUInt{$ELSE}Integer{$ENDIF fpc}{$ENDIF XE2AndUp}{$IFDEF FullDebugMode}{$IFDEF LogLockContention}; var ACollector: PStaticCollector{$ENDIF}{$ENDIF}): Pointer;
 {$ENDIF}
 
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
 assembler; // FastGetMemAssembler begin 32-bit
 asm
   {On entry:
@@ -10244,8 +10693,11 @@ like IsMultithreaded or MediumBlocksLocked}
 
 {$ELSE !SmallBlocksLockedCriticalSection}
 
-{ The 32-bit implemenation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
-By default, it will not be compiled into FastMM4-AVX which uses more efficient approach.}
+{ The 32-bit implementation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
+By default, it will not be compiled into FastMM4-AVX which uses a more efficient approach.
+A Sleep() loop also lets the thread that released a lock retake it before a woken
+waiter runs, because Windows guarantees no acquisition order; see
+https://stackoverflow.com/a/79995198/6910868 }
 @LockSmallBlockTypeLoop:
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   mov edx, eax
@@ -10730,7 +11182,7 @@ asm
   ja @NotASmallBlock
   {Get the small block type pointer in rbx}
   movzx ecx, byte ptr [r8 + rdx]
-  {The offset in the array wan't be bigger than 2^32 anyway, but an ecx instruction takes one byte less than the rcx one}
+  {The offset in the array won't be bigger than 2^32 anyway, but an ecx instruction takes one byte less than the rcx one}
   shl ecx, SmallBlockTypeRecSizePowerOf2
   add rbx, rcx
   {Do we need to lock the block type?}
@@ -10956,8 +11408,11 @@ asm
 
 {$ELSE !SmallBlocksLockedCriticalSection}
 
-{ The 64-bit implemenation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
-By default, it will not be compiled into FastMM4-AVX which uses more efficient approach.}
+{ The 64-bit implementation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
+By default, it will not be compiled into FastMM4-AVX which uses a more efficient approach.
+A Sleep() loop also lets the thread that released a lock retake it before a woken
+waiter runs, because Windows guarantees no acquisition order; see
+https://stackoverflow.com/a/79995198/6910868 }
 @LockSmallBlockTypeLoop:
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   mov edx, eax
@@ -11085,22 +11540,22 @@ By default, it will not be compiled into FastMM4-AVX which uses more efficient a
 @NoSuitableMediumBlocks:
   {Check the sequential feed medium block pool for space}
   movzx ecx, TSmallBlockType[rbx].MinimumBlockPoolSize
-  mov edi, MediumSequentialFeedBytesLeft
-  cmp edi, ecx
+  mov rdi, MediumSequentialFeedBytesLeft
+  cmp rdi, rcx
   jb @AllocateNewSequentialFeed
   {Get the address of the last block that was fed}
   mov rsi, LastSequentiallyFedMediumBlock
   {Enough sequential feed space: Will the remainder be usable?}
   movzx ecx, TSmallBlockType[rbx].OptimalBlockPoolSize
-  lea edx, [ecx + MinimumMediumBlockSize]
-  cmp edi, edx
+  lea rdx, [rcx + MinimumMediumBlockSize]
+  cmp rdi, rdx
   jb @NotMuchSpace
-  mov edi, ecx
+  mov rdi, rcx
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @NotMuchSpace:
   sub rsi, rdi
   {Update the sequential feed parameters}
-  sub MediumSequentialFeedBytesLeft, edi
+  sub MediumSequentialFeedBytesLeft, rdi
   mov LastSequentiallyFedMediumBlock, rsi
   {Get the block pointer}
   jmp @GotMediumBlock
@@ -11248,16 +11703,16 @@ but we rely on nonvolatile (callee-saved) registers ( RBX, RBP, RDI, RSI, R12)}
   jmp @GotBinAndGroup
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @TrySequentialFeedMedium:
-  mov ecx, MediumSequentialFeedBytesLeft
+  mov rcx, MediumSequentialFeedBytesLeft
   {Block can be fed sequentially?}
-  sub ecx, ebx
+  sub rcx, rbx
   jc @AllocateNewSequentialFeedForMedium
   {Get the block address}
   mov rax, LastSequentiallyFedMediumBlock
   sub rax, rbx
   mov LastSequentiallyFedMediumBlock, rax
   {Store the remaining bytes}
-  mov MediumSequentialFeedBytesLeft, ecx
+  mov MediumSequentialFeedBytesLeft, rcx
   {Set the flags for the block}
   or rbx, IsMediumBlockFlag
   mov [rax - BlockHeaderSize], rbx
@@ -11397,7 +11852,9 @@ end;
 {$ENDIF FastGetMemNeedAssemblerCode}
 
 {$IFNDEF FastFreememNeedAssemberCode}
-{Frees a medium block, returning 0 on success, -1 otherwise}
+{Frees a medium block, returning 0 on success, -1 otherwise.
+ When SoftInvalidFreeMem is defined, returns 0 for foreign pointers
+ (not allocated by FastMM) instead of raising reInvalidPtr.}
 function FreeMediumBlock(APointer: Pointer
   {$IFDEF UseReleaseStack}; ACleanupOperation: Boolean = false{$ENDIF}): Integer;
 var
@@ -11406,9 +11863,9 @@ var
   LPreviousMediumBlock: PMediumFreeBlock;
 {$ENDIF}
   LNextMediumBlockSizeAndFlags: NativeUInt;
-  LBlockSize: Cardinal;
+  LBlockSize: NativeUInt;
 {$IFNDEF FullDebugMode}
-  LPreviousMediumBlockSize: Cardinal;
+  LPreviousMediumBlockSize: NativeUInt;
 {$ENDIF}
 {$IFNDEF FullDebugMode}
   LPPreviousMediumBlockPoolHeader,
@@ -11439,6 +11896,30 @@ begin
   LBlockHeader := PNativeUInt(PByte(APointer) - BlockHeaderSize)^;
   {Get the medium block size}
   LBlockSize := LBlockHeader and DropMediumAndLargeFlagsMask;
+  {A valid medium block must be between MinimumMediumBlockSize and the
+   maximum usable pool space (MediumBlockPoolSize - MediumBlockPoolHeaderSize).
+   Blocks can exceed MaximumMediumBlockSize when they absorb remainder space
+   from the sequential feed area. A value outside this range indicates a
+   corrupt or foreign block header. A zero or undersized value would cause
+   an unsigned underflow in InsertMediumBlockIntoBin. See issue #39 for a
+   case where this occurs during Delphi/Linux ICU initialization.}
+  if (LBlockSize < MinimumMediumBlockSize) or
+     (LBlockSize > (MediumBlockPoolSize - MediumBlockPoolHeaderSize)) then
+  begin
+    {$IFDEF SoftInvalidFreeMem}
+    {The pointer was likely not allocated by FastMM (e.g. foreign C allocator
+     on Delphi/Linux, see issue #39). Return 0 instead of raising an error
+     because Delphi _FreeMem checks "if Result <> 0 then Error(reInvalidPtr)".}
+    Result := 0;
+    Exit;
+    {$ELSE}
+    {$IFDEF BCB6OrDelphi7AndUp}
+      System.Error(reInvalidPtr);
+    {$ELSE}
+      System.RunError(reInvalidPtr);
+    {$ENDIF}
+    {$ENDIF}
+  end;
   {When running a cleanup operation, medium blocks are already locked.}
 {$IFDEF UseReleaseStack}
   if not ACleanupOperation then
@@ -11489,11 +11970,16 @@ begin
   {$ENDIF}
     if (LNextMediumBlockSizeAndFlags and IsFreeBlockFlag) <> 0 then
     begin
-      {Increase the size of this block}
-      Inc(LBlockSize, LNextMediumBlockSizeAndFlags and DropMediumAndLargeFlagsMask);
-      {Remove the next block as well}
-      if LNextMediumBlockSizeAndFlags >= MinimumMediumBlockSize then
-        RemoveMediumFreeBlock(LNextMediumBlock);
+      {Guard: combined size must not exceed pool bounds (issue #39)}
+      if (LNextMediumBlockSizeAndFlags and DropMediumAndLargeFlagsMask) <=
+         (MediumBlockPoolSize - MediumBlockPoolHeaderSize) - LBlockSize then
+      begin
+        {Increase the size of this block}
+        Inc(LBlockSize, LNextMediumBlockSizeAndFlags and DropMediumAndLargeFlagsMask);
+        {Remove the next block as well}
+        if LNextMediumBlockSizeAndFlags >= MinimumMediumBlockSize then
+          RemoveMediumFreeBlock(LNextMediumBlock);
+      end;
     end
     else
     begin
@@ -11520,13 +12006,21 @@ begin
         System.RunError(reInvalidPtr);
       {$ENDIF}
     {$ENDIF}
-      {Set the new block size}
-      Inc(LBlockSize, LPreviousMediumBlockSize);
-      {This is the new current block}
-      APointer := LPreviousMediumBlock;
-      {Remove the previous block from the linked list}
-      if LPreviousMediumBlockSize >= MinimumMediumBlockSize then
-        RemoveMediumFreeBlock(LPreviousMediumBlock);
+      {Guard: combined size must not exceed pool bounds (issue #39).
+       First check prevents unsigned underflow in the subtraction when
+       LBlockSize grew beyond pool max during next-block coalescence.}
+      if (LBlockSize <= (MediumBlockPoolSize - MediumBlockPoolHeaderSize)) and
+         (LPreviousMediumBlockSize <=
+          (MediumBlockPoolSize - MediumBlockPoolHeaderSize) - LBlockSize) then
+      begin
+        {Set the new block size}
+        Inc(LBlockSize, LPreviousMediumBlockSize);
+        {This is the new current block}
+        APointer := LPreviousMediumBlock;
+        {Remove the previous block from the linked list}
+        if LPreviousMediumBlockSize >= MinimumMediumBlockSize then
+          RemoveMediumFreeBlock(LPreviousMediumBlock);
+      end;
     end;
   {$IFDEF CheckHeapForCorruption}
     {Check that the previous block is currently flagged as in use}
@@ -11683,7 +12177,7 @@ end;
 function FastFreeMem(APointer: Pointer): {$IFDEF fpc}{$IFDEF CPU64}PtrUInt{$ELSE}NativeUInt{$ENDIF}{$ELSE}Integer{$ENDIF};
 {$IFNDEF FastFreememNeedAssemberCode}
 const
-  CFastFreeMemReturnValueError = {$IFDEF fpc}NativeUInt(-1){$ELSE}-1{$ENDIF};
+  CFastFreeMemReturnValueError = {$IFDEF fpc}High(NativeUInt){$ELSE}-1{$ENDIF};
 var
   LPSmallBlockPool: PSmallBlockPoolHeader;
 {$IFNDEF FullDebugMode}
@@ -11694,6 +12188,9 @@ var
   LPSmallBlockType: PSmallBlockType;
   LOldFirstFreeBlock: Pointer;
   LBlockHeader: NativeUInt;
+{$IFDEF ClearSmallAndMediumBlocksInFreeMem}
+  LBlockSize: NativeUInt;
+{$ENDIF}
 {$IFDEF LogLockContention}
   LDidSleep: Boolean;
   LStackTrace: TStackTrace;
@@ -11734,8 +12231,48 @@ begin
   begin
     {Get a pointer to the block pool}
     LPSmallBlockPool := PSmallBlockPoolHeader(LBlockHeader);
+    {Guard: validate pool pointer before dereferencing. A foreign pointer has
+     garbage in its header; when the low 3 bits are all clear, the header value
+     is used as a pool pointer. If this value is below 64KB (always unmapped on
+     Windows and Linux), dereferencing it causes an access violation. Issue #39.}
+    if NativeUInt(LPSmallBlockPool) < $10000 then
+    begin
+{$IFDEF SoftInvalidFreeMem}
+      Result := 0;
+{$ELSE}
+  {$IFDEF BCB6OrDelphi7AndUp}
+      System.Error(reInvalidPtr);
+  {$ELSE}
+      System.RunError(reInvalidPtr);
+  {$ENDIF}
+      Result := CFastFreeMemReturnValueError;
+{$ENDIF}
+      Exit;
+    end;
     {Get the block type}
     LPSmallBlockType := LPSmallBlockPool^.BlockType;
+    {Validate that BlockType points within the SmallBlockTypes array. A foreign
+     pointer (not allocated by FastMM) will have a garbage block header that is
+     misinterpreted as a pool pointer. Reading BlockType from it yields a value
+     outside the SmallBlockTypes array. Without this check, FastMM would try to
+     lock and manipulate a garbage SmallBlockType, corrupting internal state or
+     crashing. See issue #39 for the Delphi/Linux ICU case.}
+    if (NativeUInt(LPSmallBlockType) < NativeUInt(@SmallBlockTypes[0])) or
+       (NativeUInt(LPSmallBlockType) > NativeUInt(@SmallBlockTypes[NumSmallBlockTypes - 1])) or
+       ((NativeUInt(LPSmallBlockType) - NativeUInt(@SmallBlockTypes[0])) mod SmallBlockTypeRecSize <> 0) then
+    begin
+{$IFDEF SoftInvalidFreeMem}
+      Result := 0;
+{$ELSE}
+  {$IFDEF BCB6OrDelphi7AndUp}
+      System.Error(reInvalidPtr);
+  {$ELSE}
+      System.RunError(reInvalidPtr);
+  {$ENDIF}
+      Result := CFastFreeMemReturnValueError;
+{$ENDIF}
+      Exit;
+    end;
 {$IFDEF ClearSmallAndMediumBlocksInFreeMem}
     FillChar(APointer^, LPSmallBlockType^.BlockSize - BlockHeaderSize, 0);
 {$ENDIF}
@@ -11843,7 +12380,7 @@ begin
       {Decrement the number of allocated blocks}
       Dec(LPSmallBlockPool^.BlocksInUse);
       {Small block pools are never freed in full debug mode. This increases the
-       likehood of success in catching objects still being used after being
+       likelihood of success in catching objects still being used after being
        destroyed.}
 {$IFNDEF FullDebugMode}
       {Is the entire pool now free? -> Free it.}
@@ -11946,26 +12483,92 @@ begin
     if (LBlockHeader and (IsFreeBlockFlag or IsLargeBlockFlag)) = 0 then
     begin
 {$IFDEF ClearSmallAndMediumBlocksInFreeMem}
-      {Get the block header, extract the block size and clear the block it.}
+      {Guard: validate medium block size BEFORE the ClearSmallAndMedium
+       FillChar call. A foreign pointer (not allocated by FastMM) can have
+       a garbage header whose masked size either underflows below
+       BlockHeaderSize or exceeds the pool, causing FillChar to zero
+       arbitrary memory. When clearing is disabled this extra pre-check is
+       skipped because FreeMediumBlock's internal bounds check runs before
+       the block dereferences its neighbours and suffices on its own.
+       Issue #39.}
       LBlockHeader := PNativeUInt(PByte(APointer) - BlockHeaderSize)^;
-      FillChar(APointer^,
-        (LBlockHeader and DropMediumAndLargeFlagsMask) - BlockHeaderSize, 0);
-{$ENDIF}
+      LBlockSize := LBlockHeader and DropMediumAndLargeFlagsMask;
+      if (LBlockSize < MinimumMediumBlockSize) or
+         (LBlockSize > (MediumBlockPoolSize - MediumBlockPoolHeaderSize)) then
+      begin
+  {$IFDEF SoftInvalidFreeMem}
+        Result := 0;
+  {$ELSE}
+    {$IFDEF BCB6OrDelphi7AndUp}
+        System.Error(reInvalidPtr);
+    {$ELSE}
+        System.RunError(reInvalidPtr);
+    {$ENDIF}
+        Result := CFastFreeMemReturnValueError;
+  {$ENDIF}
+      end
+      else
+      begin
+        {Block size validated; safe to clear before freeing.}
+        FillChar(APointer^, LBlockSize - BlockHeaderSize, 0);
+        Result := FreeMediumBlock(APointer);
+      end;
+{$ELSE}
       Result := FreeMediumBlock(APointer);
+{$ENDIF}
     end
     else
     begin
       {Validate: Is this actually a Large block, or is it an attempt to free an
        already freed small block?}
       if (LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag)) = 0 then
-        Result := FreeLargeBlock(APointer)
+      begin
+        {Guard: validate large block before calling FreeLargeBlock.
+         Valid large blocks have: (1) size > 0, (2) size aligned to
+         LargeBlockGranularity (65536), (3) base pointer page-aligned
+         since VirtualAlloc/valloc returns page-aligned memory.
+         These checks catch most foreign pointers but cannot guarantee
+         detection of all invalid frees. Issue #39.}
+        if ((LBlockHeader and DropMediumAndLargeFlagsMask) = 0) or
+           ((LBlockHeader and DropMediumAndLargeFlagsMask) and (LargeBlockGranularity - 1) <> 0) or
+           ((NativeUInt(APointer) - LargeBlockHeaderSize) and MinimumPageSizeMask <> 0) then
+        begin
+{$IFDEF SoftInvalidFreeMem}
+          Result := 0;
+{$ELSE}
+  {$IFDEF BCB6OrDelphi7AndUp}
+          System.Error(reInvalidPtr);
+  {$ELSE}
+          System.RunError(reInvalidPtr);
+  {$ENDIF}
+          Result := CFastFreeMemReturnValueError;
+{$ENDIF}
+        end
+        else
+          Result := FreeLargeBlock(APointer);
+      end
       else
+      begin
+{$IFDEF SoftInvalidFreeMem}
+        {Invalid pointer or double-free detected (free/medium flag mismatch):
+         return 0 to avoid _FreeMem raising reInvalidPtr.}
+        Result := 0;
+{$ELSE}
+        {Double-free or invalid pointer detection (CWE-415): raise error
+         instead of silently returning -1.}
+{$IFDEF BCB6OrDelphi7AndUp}
+        System.Error(reInvalidPtr);
+{$ELSE}
+        System.RunError(reInvalidPtr);
+{$ENDIF}
         Result := CFastFreeMemReturnValueError;
+{$ENDIF}
+      end;
     end;
   end;
 end;
 {$ELSE FastFreememNeedAssemberCode}
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
 assembler;
 asm
   {$IFDEF fpc}
@@ -12005,20 +12608,56 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
   test dl, IsFreeBlockFlag + IsMediumBlockFlag + IsLargeBlockFlag
   {the test+jnz instructions are together to allow macro-op fusion}
   jnz @NotSmallBlockInUse
+{$IFDEF SoftInvalidFreeMem}
+  {Guard: validate pool pointer (edx) before dereferencing. A foreign pointer
+   has garbage in its header; when the low 3 bits are all clear, the header
+   value is used as a pool pointer. If this value is null or below 64KB
+   (always unmapped on Windows and Linux), dereferencing it causes an access
+   violation. This guard must run before ClearSmallAndMediumBlocksInFreeMem
+   since that code also dereferences the pool pointer. Issue #39.}
+  cmp edx, $10000
+  jb @InvalidSmallBlock
+{$ENDIF}
+  {Load BlockType ONCE from the pool header into ebx (callee-saved)
+   BEFORE the ClearSmallAndMediumBlocksInFreeMem FillChar so the bounds
+   and alignment check below can run before any dereference of BlockType.
+   Without this ordering, a foreign pointer with a mapped-but-garbage pool
+   pointer would let FillChar read garbage BlockType.BlockSize and zero
+   an attacker-influenced length. Issue #39.}
+  mov ebx, TSmallBlockPoolHeader[edx].BlockType
+{$IFDEF SoftInvalidFreeMem}
+  {Validate that BlockType points within the SmallBlockTypes array and is
+   aligned to a SmallBlockTypeRecSize boundary. A foreign pointer will have
+   a garbage header yielding an out-of-range or misaligned BlockType.}
+  lea eax, SmallBlockTypes
+  cmp ebx, eax
+  jb @InvalidSmallBlock
+  lea eax, SmallBlockTypes[NumSmallBlockTypes * SmallBlockTypeRecSize]
+  cmp ebx, eax
+  jae @InvalidSmallBlock
+  {Check alignment: (BlockType - base) must be a multiple of SmallBlockTypeRecSize}
+  lea eax, SmallBlockTypes
+  neg eax
+  add eax, ebx
+  test eax, (SmallBlockTypeRecSize - 1)
+  jnz @InvalidSmallBlock
+{$ENDIF}
 {$IFDEF ClearSmallAndMediumBlocksInFreeMem}
+  {BlockType validated; safe to read BlockSize and clear the user region.
+   ebx holds the validated BlockType across the call (callee-saved in x86).
+   EAX was clobbered by the SmallBlockTypes range/alignment check (lea/neg
+   etc.) so restore it from ECX (APointer) before the FillChar register
+   convention (EAX=Dest, EDX=Count, CL=Value).}
   push edx
   push ecx
-  mov edx, TSmallBlockPoolHeader[edx].BlockType
-  movzx edx, TSmallBlockType(edx).BlockSize
+  mov eax, ecx
+  movzx edx, TSmallBlockType(ebx).BlockSize
   sub edx, BlockHeaderSize
   xor ecx, ecx
   call System.@FillChar
   pop ecx
   pop edx
 {$ENDIF}
-  {Do we need to lock the block type?}
-  {Get the small block type in ebx}
-  mov ebx, TSmallBlockPoolHeader[edx].BlockType
   {Do we need to lock the block type?}
 {$IFNDEF AssumeMultiThreaded}
   test ebp, (UnsignedBit shl StateBitMultithreaded)
@@ -12192,8 +12831,11 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
 
 {$ELSE !SmallBlocksLockedCriticalSection}
 
-{ The 32-bit implemenation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
-By default, it will not be compiled into FastMM4-AVX which uses more efficient approach.}
+{ The 32-bit implementation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
+By default, it will not be compiled into FastMM4-AVX which uses a more efficient approach.
+A Sleep() loop also lets the thread that released a lock retake it before a woken
+waiter runs, because Windows guarantees no acquisition order; see
+https://stackoverflow.com/a/79995198/6910868 }
 @LockSmallBlockTypeLoop:
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   {Attempt to grab the block type}
@@ -12249,19 +12891,40 @@ By default, it will not be compiled into FastMM4-AVX which uses more efficient a
   jnz @NotASmallOrMediumBlock
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
 @FreeMediumBlock:
+  {Drop the flags BEFORE any FillChar so size validation runs first.
+   Moving the size check ahead of ClearSmallAndMediumBlocksInFreeMem
+   prevents a foreign-pointer header with a garbage masked size from
+   driving FillChar into unrelated memory or an unsigned underflow.
+   Issue #39.}
+  and edx, DropMediumAndLargeFlagsMask
+  {Validate block size: must be between MinimumMediumBlockSize and the
+   maximum usable pool space. A foreign pointer (not allocated by FastMM)
+   will have a garbage header yielding a value outside this range. Without
+   this check, the code would read arbitrary memory offsets. Issue #39.}
+  cmp edx, MinimumMediumBlockSize
+{$IFDEF SoftInvalidFreeMem}
+  jb @InvalidMediumBlock
+{$ELSE}
+  jb @CorruptMediumBlockSize
+{$ENDIF}
+  cmp edx, MediumBlockPoolSize - MediumBlockPoolHeaderSize
+{$IFDEF SoftInvalidFreeMem}
+  ja @InvalidMediumBlock
+{$ELSE}
+  ja @CorruptMediumBlockSize
+{$ENDIF}
 {$IFDEF ClearSmallAndMediumBlocksInFreeMem}
+  {Size now validated: safe to clear. edx holds size without flags;
+   FillChar takes size - BlockHeaderSize.}
   push eax
   push edx
-  and edx, DropMediumAndLargeFlagsMask
   sub edx, BlockHeaderSize
   xor ecx, ecx
   call System.@FillChar
   pop edx
   pop eax
 {$ENDIF}
-  {Drop the flags}
-  and edx, DropMediumAndLargeFlagsMask
-  {Free the medium block pointed to by eax, header in edx}
+  {Free the medium block pointed to by eax, header (size without flags) in edx}
   {Block size in ebx}
   mov ebx, edx
   {Save registers}
@@ -12460,6 +13123,24 @@ By default, it will not be compiled into FastMM4-AVX which uses more efficient a
   {Is it in fact a large block?}
   test dl, IsFreeBlockFlag + IsMediumBlockFlag
   jnz @DontFreeLargeBlock
+  {Large-block foreign pointer guard: size non-zero, aligned to
+   LargeBlockGranularity, base page-aligned. Mirrors the Pascal path
+   guard at FastMM4.pas:12260-12268. Without this, FreeLargeBlock would
+   read the large-block linked-list header from an attacker-influenced
+   address and call VirtualFree on a non-VirtualAlloc pointer.
+   ecx holds a copy of APointer, no longer live here, so use it as a
+   scratch. On failure, jmp @DontFreeLargeBlock which maps to
+   xor eax, eax in SoftInvalidFreeMem and reInvalidPtr otherwise.
+   Issue #39.}
+  mov ecx, edx
+  and ecx, DropMediumAndLargeFlagsMask
+  jz @DontFreeLargeBlock
+  test ecx, LargeBlockGranularity - 1
+  jnz @DontFreeLargeBlock
+  mov ecx, eax
+  sub ecx, LargeBlockHeaderSize
+  test ecx, MinimumPageSizeMask
+  jnz @DontFreeLargeBlock
   pop ebx
 {$IFNDEF AssumeMultiThreaded}
   pop ebp
@@ -12468,8 +13149,46 @@ By default, it will not be compiled into FastMM4-AVX which uses more efficient a
   jmp @Finish
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @DontFreeLargeBlock:
-  {Attempt to free an already free block}
-  mov eax, -1
+{$IFDEF SoftInvalidFreeMem}
+  {Foreign pointer or double-free: return 0 to avoid _FreeMem raising
+   reInvalidPtr. See issue #39.}
+  xor eax, eax
+{$ELSE}
+  {Double-free or invalid pointer detection (CWE-415)}
+  mov eax, reInvalidPtr
+{$IFDEF BCB6OrDelphi7AndUp}
+  call System.Error
+{$ELSE}
+  call RunErrorInvalidPtr
+{$ENDIF}
+{$ENDIF}
+  jmp @Exit
+{$IFDEF SoftInvalidFreeMem}
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@InvalidSmallBlock:
+  {Foreign pointer detected in small block path: BlockType is outside the
+   SmallBlockTypes array or misaligned. Return 0 to avoid corruption. See
+   issue #39.}
+  xor eax, eax
+  jmp @Exit
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@InvalidMediumBlock:
+  {Foreign pointer detected in medium block path: block size outside valid
+   range. Return 0 to avoid corruption. See issue #39.}
+  xor eax, eax
+  jmp @Exit
+{$ELSE}
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@CorruptMediumBlockSize:
+  {Corrupt medium block size detected (issue #39)}
+  mov eax, reInvalidPtr
+{$IFDEF BCB6OrDelphi7AndUp}
+  call System.Error
+{$ELSE}
+  call RunErrorInvalidPtr
+{$ENDIF}
+  jmp @Exit
+{$ENDIF}
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
 @Exit:
   pop ebx
@@ -12479,7 +13198,7 @@ By default, it will not be compiled into FastMM4-AVX which uses more efficient a
 @Finish:
 end;
 
-{$ELSE 32Bit}
+{$ELSE 32BIT}
 
 {---------------64-bit BASM FastFreeMem---------------}
 assembler;  // rcx = address
@@ -12526,18 +13245,52 @@ asm
   test dl, IsFreeBlockFlag + IsMediumBlockFlag + IsLargeBlockFlag
   {put test+jnz together to allow macro-op fusion}
   jnz @NotSmallBlockInUse
+{$IFDEF SoftInvalidFreeMem}
+  {Guard: validate pool pointer (rdx) before dereferencing. A foreign pointer
+   has garbage in its header; when the low 3 bits are all clear, the header
+   value is used as a pool pointer. If this value is null or below 64KB
+   (always unmapped on Windows and Linux), dereferencing it causes an access
+   violation. This guard must run before ClearSmallAndMediumBlocksInFreeMem
+   since that code also dereferences the pool pointer. Issue #39.}
+  cmp rdx, $10000
+  jb @InvalidSmallBlock
+{$ENDIF}
+  {Load BlockType ONCE from the pool header into rbx (callee-saved)
+   BEFORE the ClearSmallAndMediumBlocksInFreeMem FillChar so the bounds
+   and alignment check below can run before any dereference of BlockType.
+   Without this ordering, a foreign pointer with a mapped-but-garbage pool
+   pointer would let FillChar read garbage BlockType.BlockSize and zero
+   an attacker-influenced length. Issue #39.}
+  mov rbx, TSmallBlockPoolHeader[rdx].BlockType
+{$IFDEF SoftInvalidFreeMem}
+  {Validate that BlockType points within the SmallBlockTypes array and is
+   aligned to a SmallBlockTypeRecSize boundary. A foreign pointer will have
+   a garbage header yielding an out-of-range or misaligned BlockType.}
+  lea rax, SmallBlockTypes
+  cmp rbx, rax
+  jb @InvalidSmallBlock
+  lea rax, SmallBlockTypes[NumSmallBlockTypes * SmallBlockTypeRecSize]
+  cmp rbx, rax
+  jae @InvalidSmallBlock
+  {Check alignment: (BlockType - base) must be a multiple of SmallBlockTypeRecSize}
+  lea rax, SmallBlockTypes
+  neg rax
+  add rax, rbx
+  test rax, (SmallBlockTypeRecSize - 1)
+  jnz @InvalidSmallBlock
+{$ENDIF}
 {$IFDEF ClearSmallAndMediumBlocksInFreeMem}
+  {BlockType validated; safe to read BlockSize and clear the user region.
+   rsi preserves APointer across the call; rbx is callee-saved so it
+   survives FillChar without explicit save.}
   mov rsi, rcx
-  mov rdx, TSmallBlockPoolHeader[rdx].BlockType
-  movzx edx, TSmallBlockType(rdx).BlockSize
+  movzx edx, TSmallBlockType(rbx).BlockSize
   sub edx, BlockHeaderSize
   xor r8, r8
   call System.@FillChar
   mov rcx, rsi
   mov rdx, [rcx - BlockHeaderSize]
 {$ENDIF}
-  {Get the small block type in rbx}
-  mov rbx, TSmallBlockPoolHeader[rdx].BlockType
   {Do we need to lock the block type?}
 {$IFNDEF AssumeMultiThreaded}
   test r12b, (UnsignedBit shl StateBitMultithreaded)
@@ -12784,8 +13537,11 @@ asm
 
 {$ELSE !SmallBlocksLockedCriticalSection}
 
-{ The 64-bit implemenation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
-By default, it will not be compiled into FastMM4-AVX which uses more efficient approach.}
+{ The 64-bit implementation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
+By default, it will not be compiled into FastMM4-AVX which uses a more efficient approach.
+A Sleep() loop also lets the thread that released a lock retake it before a woken
+waiter runs, because Windows guarantees no acquisition order; see
+https://stackoverflow.com/a/79995198/6910868 }
 @LockSmallBlockTypeLoop:
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   {Attempt to grab the block type}
@@ -12836,18 +13592,40 @@ By default, it will not be compiled into FastMM4-AVX which uses more efficient a
   jnz @NotASmallOrMediumBlock
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @FreeMediumBlock:
-{$IFDEF ClearSmallAndMediumBlocksInFreeMem}
-  mov rsi, rcx
+  {Drop the flags BEFORE any FillChar so size validation runs first.
+   Moving the size check ahead of ClearSmallAndMediumBlocksInFreeMem
+   prevents a foreign-pointer header with a garbage masked size from
+   driving FillChar into unrelated memory or an unsigned underflow.
+   Issue #39.}
   and rdx, DropMediumAndLargeFlagsMask
+  {Validate block size: must be between MinimumMediumBlockSize and the
+   maximum usable pool space. A foreign pointer (not allocated by FastMM)
+   will have a garbage header yielding a value outside this range. Without
+   this check, the code would read arbitrary memory offsets. Issue #39.}
+  cmp rdx, MinimumMediumBlockSize
+{$IFDEF SoftInvalidFreeMem}
+  jb @InvalidMediumBlock
+{$ELSE}
+  jb @CorruptMediumBlockSize
+{$ENDIF}
+  cmp rdx, MediumBlockPoolSize - MediumBlockPoolHeaderSize
+{$IFDEF SoftInvalidFreeMem}
+  ja @InvalidMediumBlock
+{$ELSE}
+  ja @CorruptMediumBlockSize
+{$ENDIF}
+{$IFDEF ClearSmallAndMediumBlocksInFreeMem}
+  {Size validated; safe to clear. rsi preserves APointer across the call
+   because FillChar destroys volatile regs (rcx, rdx, r8-r11).}
+  mov rsi, rcx
   sub rdx, BlockHeaderSize
   xor r8, r8
   call System.@FillChar
   mov rcx, rsi
   mov rdx, [rcx - BlockHeaderSize]
-{$ENDIF}
-  {Drop the flags}
   and rdx, DropMediumAndLargeFlagsMask
-  {Free the medium block pointed to by eax, header in edx}
+{$ENDIF}
+  {Free the medium block pointed to by rcx, size (without flags) in rdx}
   {Block size in rbx}
   mov rbx, rdx
   {Pointer in rsi}
@@ -12959,7 +13737,7 @@ but we don't need them at this point}
    current sequential feed pool is not entirely free, we make this the new
    sequential feed pool.}
   lea r8, MediumSequentialFeedBytesLeft
-  cmp dword ptr [r8], MediumBlockPoolSize - MediumBlockPoolHeaderSize //workaround for QC99023
+  cmp qword ptr [r8], MediumBlockPoolSize - MediumBlockPoolHeaderSize //workaround for QC99023
   jne @MakeEmptyMediumPoolSequentialFeed
   {Point esi to the medium block pool header}
   sub rsi, MediumBlockPoolHeaderSize
@@ -13013,7 +13791,7 @@ but we don't need them at this point}
   mov qword ptr [rbx - BlockHeaderSize], IsMediumBlockFlag
   {Store the number of bytes available in the sequential feed chunk}
   lea rax, MediumSequentialFeedBytesLeft
-  mov dword ptr [rax], MediumBlockPoolSize - MediumBlockPoolHeaderSize //QC99023 workaround
+  mov qword ptr [rax], MediumBlockPoolSize - MediumBlockPoolHeaderSize //QC99023 workaround
   {Set the last sequentially fed block}
   mov LastSequentiallyFedMediumBlock, rbx
   {Success}
@@ -13038,12 +13816,69 @@ but we don't need them at this point}
   jmp @Done
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @NotASmallOrMediumBlock:
-  {Attempt to free an already free block?}
-  mov eax, -1
   {Is it in fact a large block?}
   test dl, IsFreeBlockFlag + IsMediumBlockFlag
-  jnz @Done
+  jnz @DoubleFreeDetected
+  {Large-block foreign pointer guard: size non-zero, aligned to
+   LargeBlockGranularity, base page-aligned. Mirrors the Pascal path
+   guard at FastMM4.pas:12260-12268. Without this, FreeLargeBlock would
+   read the large-block linked-list header from an attacker-influenced
+   address and call VirtualFree on a non-VirtualAlloc pointer. rax is
+   volatile in Win64 ABI so it can be used as scratch without save.
+   On failure, jmp @DoubleFreeDetected (xor eax, eax in Soft mode,
+   reInvalidPtr otherwise). Issue #39.}
+  mov rax, rdx
+  and rax, DropMediumAndLargeFlagsMask
+  jz @DoubleFreeDetected
+  test rax, LargeBlockGranularity - 1
+  jnz @DoubleFreeDetected
+  mov rax, rcx
+  sub rax, LargeBlockHeaderSize
+  test rax, MinimumPageSizeMask
+  jnz @DoubleFreeDetected
   call FreeLargeBlock
+  jmp @Done
+@DoubleFreeDetected:
+{$IFDEF SoftInvalidFreeMem}
+  {Foreign pointer or double-free: return 0 to avoid _FreeMem raising
+   reInvalidPtr. See issue #39.}
+  xor eax, eax
+{$ELSE}
+  {Double-free or invalid pointer detection (CWE-415)}
+  mov ecx, reInvalidPtr
+{$IFDEF BCB6OrDelphi7AndUp}
+  call System.Error
+{$ELSE}
+  call RunErrorInvalidPtr
+{$ENDIF}
+{$ENDIF}
+  jmp @Done
+{$IFDEF SoftInvalidFreeMem}
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@InvalidSmallBlock:
+  {Foreign pointer detected in small block path: BlockType is outside the
+   SmallBlockTypes array or misaligned. Return 0 to avoid corruption. See
+   issue #39.}
+  xor eax, eax
+  jmp @Done
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@InvalidMediumBlock:
+  {Foreign pointer detected in medium block path: block size outside valid
+   range. Return 0 to avoid corruption. See issue #39.}
+  xor eax, eax
+  jmp @Done
+{$ELSE}
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@CorruptMediumBlockSize:
+  {Corrupt medium block size detected (issue #39)}
+  mov ecx, reInvalidPtr
+{$IFDEF BCB6OrDelphi7AndUp}
+  call System.Error
+{$ELSE}
+  call RunErrorInvalidPtr
+{$ENDIF}
+  jmp @Done
+{$ENDIF}
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNodot}align{$ELSE}.align{$ENDIF} 8{$ENDIF}
 @Done: {automatically restores registers from stack by implicitly inserting pop instructions (rbx, rsi and r12)}
 {$IFNDEF AllowAsmParams}
@@ -13054,7 +13889,7 @@ but we don't need them at this point}
    pop rbx
 {$ENDIF}
 end;
-{$ENDIF 32Bit}
+{$ENDIF 32BIT}
 {$ENDIF FastFreememNeedAssemberCode}
 
 
@@ -13075,6 +13910,7 @@ var
   LOldAvailableSize,
   LNewAllocSize,
   LNewBlockSize,
+  LOldBlockSize,
   LNewAvailableSize: NativeUInt;
   LPNextBlock: Pointer;
   LPNextBlockHeader: Pointer;
@@ -13100,7 +13936,7 @@ var
     LSum := LNewAvailableSize + BlockHeaderSize;
     if LSum <= LNewBlockSize then
     begin
-      LSecondSplitSize := NativeUInt(-1);
+      LSecondSplitSize := High(NativeUInt);
       {The block size is the full available size plus header}
       LNewBlockSize := LNewAvailableSize + BlockHeaderSize;
       {Grab the whole block: Mark it as used in the block following it}
@@ -13141,7 +13977,7 @@ var
     LNewBlockSize := ((NativeUInt(ANewSize) + (BlockHeaderSize + MediumBlockGranularity - 1 - MediumBlockSizeOffset))
       and MediumBlockGranularityMask) + MediumBlockSizeOffset;
     {Get the size of the second split}
-    LSecondSplitSize := (LOldAvailableSize + BlockHeaderSize) - LNewBlockSize;
+    LSecondSplitSize := LOldBlockSize - LNewBlockSize;
     {Lock the medium blocks}
 
 {$IFNDEF AssumeMultiThreaded}
@@ -13160,7 +13996,7 @@ var
       (PNativeUInt(PByte(APointer) - BlockHeaderSize)^ and ExtractMediumAndLargeFlagsMask)
       or LNewBlockSize;
     {Is the next block in use?}
-    LPNextBlock := PNativeUInt(PByte(APointer) + LOldAvailableSize + BlockHeaderSize);
+    LPNextBlock := PNativeUInt(PByte(APointer) + LOldBlockSize);
     LNextBlockSizeAndFlags := PNativeUInt(PByte(LPNextBlock) - BlockHeaderSize)^;
     if (LNextBlockSizeAndFlags and IsFreeBlockFlag) = 0 then
     begin
@@ -13242,8 +14078,42 @@ begin
   if ((LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag or IsLargeBlockFlag))) = 0 then
   begin
     {-----------------------------------Small block-------------------------------------}
-    {The block header is a pointer to the block pool: Get the block type}
+    {The block header is a pointer to the block pool. Validate the pool pointer
+     before dereferencing: a foreign pointer has garbage in its header, and when
+     the low 3 bits are clear it enters this path. If the header value is below
+     64KB (unmapped on Windows and Linux) or the BlockType falls outside the
+     SmallBlockTypes array, the block is invalid. Issue #39.}
+    if NativeUInt(LBlockHeader) < $10000 then
+    begin
+{$IFDEF SoftInvalidFreeMem}
+      Result := nil;
+{$ELSE}
+  {$IFDEF BCB6OrDelphi7AndUp}
+      System.Error(reInvalidPtr);
+  {$ELSE}
+      System.RunError(reInvalidPtr);
+  {$ENDIF}
+{$ENDIF}
+      Exit;
+    end;
+    {Get the block type}
     LPSmallBlockType := PSmallBlockPoolHeader(LBlockHeader)^.BlockType;
+    {Validate BlockType within SmallBlockTypes array}
+    if (NativeUInt(LPSmallBlockType) < NativeUInt(@SmallBlockTypes[0])) or
+       (NativeUInt(LPSmallBlockType) > NativeUInt(@SmallBlockTypes[NumSmallBlockTypes - 1])) or
+       ((NativeUInt(LPSmallBlockType) - NativeUInt(@SmallBlockTypes[0])) mod SmallBlockTypeRecSize <> 0) then
+    begin
+{$IFDEF SoftInvalidFreeMem}
+      Result := nil;
+{$ELSE}
+  {$IFDEF BCB6OrDelphi7AndUp}
+      System.Error(reInvalidPtr);
+  {$ELSE}
+      System.RunError(reInvalidPtr);
+  {$ENDIF}
+{$ENDIF}
+      Exit;
+    end;
     {Get the available size inside blocks of this type.}
     LOldAvailableSize := LPSmallBlockType^.BlockSize - BlockHeaderSize;
     {Is it an upsize or a downsize?}
@@ -13323,8 +14193,27 @@ begin
       {-------------------------------Medium block--------------------------------------}
       {What is the available size in the block being reallocated?}
       LOldAvailableSize := (LBlockHeader and DropMediumAndLargeFlagsMask);
+      {Validate medium block size (issue #39): must be within valid pool range.
+       A foreign or corrupt pointer produces a bogus size that can cause unsigned
+       underflow or out-of-bounds access in subsequent operations.}
+      if (LOldAvailableSize < MinimumMediumBlockSize) or
+         (LOldAvailableSize > (MediumBlockPoolSize - MediumBlockPoolHeaderSize)) then
+      begin
+{$IFDEF SoftInvalidFreeMem}
+        Result := nil;
+{$ELSE}
+  {$IFDEF BCB6OrDelphi7AndUp}
+        System.Error(reInvalidPtr);
+  {$ELSE}
+        System.RunError(reInvalidPtr);
+  {$ENDIF}
+{$ENDIF}
+        Exit;
+      end;
+      {Save the full block size before stripping the header}
+      LOldBlockSize := LOldAvailableSize;
       {Get a pointer to the next block}
-      LPNextBlock := PNativeUInt(PByte(APointer) + LOldAvailableSize);
+      LPNextBlock := PNativeUInt(PByte(APointer) + LOldBlockSize);
       {Subtract the block header size from the old available size}
       Dec(LOldAvailableSize, BlockHeaderSize);
       {Is it an upsize or a downsize?}
@@ -13530,7 +14419,7 @@ begin
 {$ENDIF}
 end;
 {$ELSE FastReallocMemNeedAssemberCode}
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
 assembler;
 {$IFNDEF AssumeMultiThreaded}
 const
@@ -13600,8 +14489,37 @@ asm // FastReallocMemAssembler begin 32-bit
   test cl, IsFreeBlockFlag + IsMediumBlockFlag + IsLargeBlockFlag
   jnz @NotASmallBlock {test+jnz provides macro-op fusion}
   {-----------------------------------Small block-------------------------------------}
+{$IFDEF SoftInvalidFreeMem}
+  {Foreign-pointer guards mirroring Pascal FastReallocMem at FastMM4.pas:
+   13814-13844. (1) Pool pointer (ecx, which equals the raw header for
+   small blocks) must be >= 64 KiB because anything below is unmapped on
+   Windows and Linux. (2) BlockType loaded from the pool header must fall
+   within the SmallBlockTypes array and be SmallBlockTypeRecSize-aligned.
+   Without these, the unvalidated TSmallBlockType[ebx].BlockSize read
+   could return an attacker-influenced length fed to the Move procedure.
+   Issue #39.}
+  cmp ecx, $10000
+  jb @InvalidSmallReallocPtr
+{$ENDIF}
   {Get the block type in ebx}
   mov ebx, TSmallBlockPoolHeader[ecx].BlockType
+{$IFDEF SoftInvalidFreeMem}
+  {Validate BlockType bounds and alignment. eax is clobbered by the range
+   check; restored to esi (APointer) afterwards so the in-place downsize
+   path at @Exit2Reg still returns the original pointer.}
+  lea eax, SmallBlockTypes
+  cmp ebx, eax
+  jb @InvalidSmallReallocPtr
+  lea eax, SmallBlockTypes[NumSmallBlockTypes * SmallBlockTypeRecSize]
+  cmp ebx, eax
+  jae @InvalidSmallReallocPtr
+  lea eax, SmallBlockTypes
+  neg eax
+  add eax, ebx
+  test eax, (SmallBlockTypeRecSize - 1)
+  jnz @InvalidSmallReallocPtr
+  mov eax, esi
+{$ENDIF}
   {Get the available size inside blocks of this type.}
   movzx ecx, TSmallBlockType[ebx].BlockSize
   sub ecx, 4
@@ -13728,6 +14646,19 @@ asm // FastReallocMemAssembler begin 32-bit
   mov ebx, ecx
   {Drop the flags from the header}
   and ecx, DropMediumAndLargeFlagsMask
+{$IFDEF SoftInvalidFreeMem}
+  {Medium-block size validation: mirrors Pascal FastReallocMem check at
+   FastMM4.pas:13924-13940. Without this, a foreign pointer whose header
+   encodes IsMediumBlockFlag with garbage upper bits lets the lea below
+   compute an attacker-controlled next-block pointer, which subsequent
+   code dereferences to read flags and sometimes write through its
+   NextFreeBlock/PreviousFreeBlock fields (unsafe-unlink primitive).
+   Issue #39.}
+  cmp ecx, MinimumMediumBlockSize
+  jb @InvalidMediumReallocPtr
+  cmp ecx, MediumBlockPoolSize - MediumBlockPoolHeaderSize
+  ja @InvalidMediumReallocPtr
+{$ENDIF}
   {Save edi}
   push edi
   {Get a pointer to the next block in edi}
@@ -13977,7 +14908,12 @@ asm // FastReallocMemAssembler begin 32-bit
   and eax, MediumBlockGranularityMask
   add eax, MediumBlockSizeOffset
   {Calculate the size of the second split}
+{$IFDEF FPC}
+  mov edx, ebp
+  add edx, BlockHeaderSize
+{$ELSE}
   lea edx, [ebp + BlockHeaderSize]
+{$ENDIF}
   sub edx, eax
   {Does it fit?}
   ja @MediumInPlaceUpsizeSplit
@@ -14135,6 +15071,24 @@ asm // FastReallocMemAssembler begin 32-bit
   jmp @FpcExitStrackRestored
 {$ENDIF}
 
+{$IFDEF SoftInvalidFreeMem}
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@InvalidSmallReallocPtr:
+  {Foreign pointer detected in ASM FastReallocMem small-block path
+   (pool pointer below 64 KiB or BlockType outside SmallBlockTypes).
+   Return nil via the standard 2-register epilogue. Issue #39.}
+  xor eax, eax
+  jmp @Exit2Reg
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@InvalidMediumReallocPtr:
+  {Foreign pointer detected in ASM FastReallocMem medium-block path
+   (size below MinimumMediumBlockSize or above the pool usable space).
+   Stack at this point has only ebx/esi + local var pushed (edi is saved
+   later), so the 2-register epilogue is correct. Issue #39.}
+  xor eax, eax
+  jmp @Exit2Reg
+{$ENDIF}
+
 {Don't need alignment here since all instructions are just one-byte}
 @Exit4Reg: {return, restoring 4 registers from the stack and one local variable}
   pop ebp
@@ -14206,8 +15160,34 @@ asm
   test cl, IsFreeBlockFlag + IsMediumBlockFlag + IsLargeBlockFlag
   jnz @NotASmallBlock
   {-----------------------------------Small block-------------------------------------}
+{$IFDEF SoftInvalidFreeMem}
+  {Foreign-pointer guards mirroring Pascal FastReallocMem at FastMM4.pas:
+   13814-13844. (1) Pool pointer (rcx, which equals the raw header for
+   small blocks) must be >= 64 KiB because anything below is unmapped on
+   Windows and Linux. (2) BlockType loaded from the pool header must fall
+   within the SmallBlockTypes array and be SmallBlockTypeRecSize-aligned.
+   Without these, the unvalidated TSmallBlockType[rbx].BlockSize read
+   could return an attacker-influenced length fed to the Move procedure.
+   rax is volatile per Win64 ABI so it can serve as scratch without save.
+   Issue #39.}
+  cmp rcx, $10000
+  jb @InvalidSmallReallocPtr
+{$ENDIF}
   {Get the block type in rbx}
   mov rbx, TSmallBlockPoolHeader[rcx].BlockType
+{$IFDEF SoftInvalidFreeMem}
+  lea rax, SmallBlockTypes
+  cmp rbx, rax
+  jb @InvalidSmallReallocPtr
+  lea rax, SmallBlockTypes[NumSmallBlockTypes * SmallBlockTypeRecSize]
+  cmp rbx, rax
+  jae @InvalidSmallReallocPtr
+  lea rax, SmallBlockTypes
+  neg rax
+  add rax, rbx
+  test rax, (SmallBlockTypeRecSize - 1)
+  jnz @InvalidSmallReallocPtr
+{$ENDIF}
   {Get the available size inside blocks of this type.}
   movzx ecx, TSmallBlockType[rbx].BlockSize
   sub ecx, BlockHeaderSize
@@ -14336,6 +15316,19 @@ asm
   mov rbx, rcx
   {Drop the flags from the header}
   and ecx, DropMediumAndLargeFlagsMask
+{$IFDEF SoftInvalidFreeMem}
+  {Medium-block size validation: mirrors Pascal FastReallocMem check at
+   FastMM4.pas:13924-13940. Without this, a foreign pointer whose header
+   encodes IsMediumBlockFlag with garbage upper bits lets the lea below
+   compute an attacker-controlled next-block pointer, which subsequent
+   code dereferences to read flags and sometimes write through its
+   NextFreeBlock/PreviousFreeBlock fields (unsafe-unlink primitive).
+   Issue #39.}
+  cmp ecx, MinimumMediumBlockSize
+  jb @InvalidMediumReallocPtr
+  cmp ecx, MediumBlockPoolSize - MediumBlockPoolHeaderSize
+  ja @InvalidMediumReallocPtr
+{$ENDIF}
   {Get a pointer to the next block in rdi}
   lea rdi, [rsi + rcx]
   {Subtract the block header size from the old available size}
@@ -14741,6 +15734,22 @@ so ew save RCX and RDX}
   call ReallocateLargeBlock
   jmp @Done
   {-----------------------Invalid block------------------------------}
+{$IFDEF SoftInvalidFreeMem}
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@InvalidSmallReallocPtr:
+  {Foreign pointer detected in ASM FastReallocMem small-block path
+   (pool pointer below 64 KiB or BlockType outside SmallBlockTypes).
+   Return nil via @Done. Issue #39.}
+  xor eax, eax
+  jmp @Done
+  {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
+@InvalidMediumReallocPtr:
+  {Foreign pointer detected in ASM FastReallocMem medium-block path
+   (size below MinimumMediumBlockSize or above the pool usable space).
+   Return nil via @Done. Issue #39.}
+  xor eax, eax
+  jmp @Done
+{$ENDIF}
   {$IFDEF AsmCodeAlign}{$IFDEF AsmAlNoDot}align{$ELSE}.align{$ENDIF} 4{$ENDIF}
 @Error:
   xor eax, eax
@@ -14778,7 +15787,7 @@ begin
     FillChar(Result^, ASize, 0);
 end;
 {$ELSE}
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
 assembler;
 asm
   push ebx
@@ -14986,7 +15995,14 @@ begin
   AppendStringToModuleName(InvalidOperationTitle, LErrorMessageTitle, Length(InvalidOperationTitle), (SizeOf(LErrorMessageTitle) div SizeOf(LErrorMessageTitle[0])-1));
   ShowMessageBox(InvalidFreeMemMsg, LErrorMessageTitle);
 {$ENDIF}
-  Result := {$IFDEF fpc}NativeUInt(-1){$ELSE}-1{$ENDIF};
+{$IFDEF SoftInvalidFreeMem}
+  {Return 0 so Delphi _FreeMem does not raise reInvalidPtr for late FreeMem
+   calls after FastMM is uninstalled (defense-in-depth; NeverUninstall is
+   also auto-defined when SoftInvalidFreeMem is active).}
+  Result := 0;
+{$ELSE}
+  Result := {$IFDEF fpc}High(NativeUInt){$ELSE}-1{$ENDIF};
+{$ENDIF}
 end;
 
 function InvalidReallocMem({$IFDEF fpc}var {$ENDIF}APointer: Pointer; ANewSize: {$IFDEF XE2AndUp}NativeInt{$ELSE}{$IFDEF fpc}NativeUInt{$ELSE}Integer{$ENDIF}{$ENDIF}): Pointer;
@@ -15240,7 +16256,7 @@ end;
  If Unequal: Result := [AAddress]}
 function LockCmpxchg32(CompareVal, NewVal: Integer; AAddress: PInteger): Integer; assembler;
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {On entry for 32-bit Windows:
     eax = CompareVal,
     edx = NewVal,
@@ -15297,15 +16313,41 @@ begin
   end;
 end;
 
+{$IFDEF FPC}
+{A global variable named inside an assembler block is encoded by the 64-bit
+ FreePascal assembler as an absolute address rather than as a RIP-relative one,
+ which is the same limitation that makes this unit undefine ASMVersion for
+ 64-bit FreePascal further above. The address that the assembler code computes
+ is then not the address of the variable, so a locked increment or decrement
+ through it writes to an unrelated location or raises an access violation. The
+ two helpers below are ordinary Pascal, where the compiler emits the
+ RIP-relative reference itself, and they hand the address to the assembler code
+ in rax, in the same way as GetMediumBlocksLockedPointer does for
+ AcquireSpinLockMediumBlocks.}
+function GetThreadsInFullDebugModeRoutinePointer: PInteger;
+begin
+  Result := @ThreadsInFullDebugModeRoutine;
+end;
+
+function GetCurrentAllocationNumberPointer: PCardinal;
+begin
+  Result := @CurrentAllocationNumber;
+end;
+{$ENDIF}
+
 procedure DoneChangingFullDebugModeBlock; assembler;
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   lock dec ThreadsInFullDebugModeRoutine
 {$ELSE}
 {$IFDEF AllowAsmNoframe}
 .noframe
 {$ENDIF}
+{$IFDEF FPC}
+  call GetThreadsInFullDebugModeRoutinePointer
+{$ELSE}
   lea rax, ThreadsInFullDebugModeRoutine
+{$ENDIF}
   lock dec dword ptr [rax]
 {$ENDIF}
 end;
@@ -15313,13 +16355,17 @@ end;
 {Increments the allocation number}
 procedure IncrementAllocationNumber; assembler;
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   lock inc CurrentAllocationNumber
 {$ELSE}
 {$IFDEF AllowAsmNoframe}
 .noframe
 {$ENDIF}
+{$IFDEF FPC}
+  call GetCurrentAllocationNumberPointer
+{$ELSE}
   lea rax, CurrentAllocationNumber
+{$ENDIF}
   lock inc dword ptr [rax]
 {$ENDIF}
 end;
@@ -15407,7 +16453,7 @@ end;
 function SumNativeUInts(AStartValue: NativeUInt; APointer: PNativeUInt;
   ACount: NativeUInt): NativeUInt; assembler;
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {On entry: eax = AStartValue, edx = APointer; ecx = ACount}
   add edx, ecx
   neg ecx
@@ -15438,7 +16484,7 @@ end;
 function CheckFillPattern(APointer: Pointer; ACount: NativeUInt;
   AFillPattern: NativeUInt): Boolean; assembler;
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   {On entry: eax = APointer; edx = ACount; ecx = AFillPattern}
   add eax, edx
   neg edx
@@ -15604,7 +16650,7 @@ end;
 {Rotates AValue ABitCount bits to the right}
 function RotateRight(AValue, ABitCount: NativeUInt): NativeUInt; assembler;
 asm
-{$IFDEF 32Bit}
+{$IFDEF 32BIT}
   mov ecx, edx
   ror eax, cl
 {$ELSE}
@@ -15627,7 +16673,11 @@ begin
   if AUserOffset < SizeOf(Pointer) then
   begin
 {$IFDEF FPC}
-    LFillPattern := NativeUInt(DebugFillPattern);
+    {DebugFreeMem stores a zero in the first pointer of the user area where
+     Delphi stores the address of the dummy VMT, so zero is what an unmodified
+     freed block holds here. Expecting the fill pattern instead reported those
+     bytes as changed in every error report, whatever the real change was.}
+    LFillPattern := 0;
 {$ELSE}
     LFillPattern := NativeUInt(@FreedObjectVMT.VMTMethods[0]);
 {$ENDIF}
@@ -16065,9 +17115,25 @@ begin
   LFooterValid := LHeaderValid
     and (PNativeUInt(PByte(APBlock) + SizeOf(TFullDebugBlockHeader) + APBlock^.UserSize)^ = (not LHeaderCheckSum));
   {Is the footer and debug VMT in place? The debug VMT is only valid if the user size is greater than the size of a pointer.}
-{$IFNDEF FPC}
+  {There is no dummy VMT for freed objects under FreePascal: DebugFreeMem stores
+   a zero in the first pointer of the user area instead of the address of
+   FreedObjectVMT, so that zero is what is checked there. The fill pattern check
+   below starts after that first pointer on every compiler, so without this test
+   a write into the first field of a freed object would go unnoticed.
+   Compiling the whole statement out, which is what happened before, left
+   LBlockUnmodified permanently False, so every GetMem of a reused block
+   reported a block modified after being freed and returned nil.}
   if LFooterValid
-    and (APBlock.UserSize < SizeOf(Pointer)) or (PNativeUInt(PByte(APBlock) + SizeOf(TFullDebugBlockHeader))^ = NativeUInt(@FreedObjectVMT.VMTMethods[0])) then
+{$IFNDEF FPC}
+    {The inner parentheses matter: "and" binds tighter than "or", so without them
+     a block whose first pointer happens to hold the dummy VMT address entered
+     this branch even when the footer had not verified, and the fill pattern was
+     then written at an offset taken from a UserSize that had not been checked}
+    and ((APBlock.UserSize < SizeOf(Pointer)) or (PNativeUInt(PByte(APBlock) + SizeOf(TFullDebugBlockHeader))^ = NativeUInt(@FreedObjectVMT.VMTMethods[0])))
+{$ELSE}
+    and ((APBlock^.UserSize < SizeOf(Pointer)) or (PNativeUInt(PByte(APBlock) + SizeOf(TFullDebugBlockHeader))^ = 0))
+{$ENDIF}
+    then
   begin
     {Store the debug fill pattern in place of the footer in order to simplify
      checking for block modifications.}
@@ -16086,7 +17152,6 @@ begin
     PNativeUInt(PByte(APBlock) + SizeOf(TFullDebugBlockHeader) + APBlock.UserSize)^ := not LHeaderCheckSum;
   end
   else
-{$ENDIF}
     LBlockUnmodified := False;
   if (not LHeaderValid) or (not LFooterValid) or (not LBlockUnmodified) then
   begin
@@ -16098,8 +17163,12 @@ begin
 end;
 
 function DebugGetMem(ASize: {$IFDEF FPC}ptruint{$ELSE}{$IFDEF XE2AndUp}NativeInt{$ELSE}Integer{$ENDIF}{$ENDIF}): Pointer;
-{$IFDEF LogLockContention}
 var
+  {True when the size below is refused for its own sake rather than by the
+   allocator. The two reach the same nil, and only one of them means the
+   address space is exhausted.}
+  LSizeRefused: Boolean;
+{$IFDEF LogLockContention}
   LCollector: PStaticCollector;
   LStackTrace: TStackTrace;
 {$ENDIF}
@@ -16107,12 +17176,43 @@ begin
   {Scan the entire memory pool first?}
   if FullDebugModeScanMemoryPoolBeforeEveryOperation then
     ScanMemoryPoolForCorruptions;
+
+  {The 32-bit assembly language System.AllocMem lets negative size requests through.  Additionally, both the 32-bit and
+  64-bit paths are vulnerable to bad size requests when called from System.GetMemory.}
+  if ASize < 0 then
+  begin
+    Result := nil;
+    Exit;
+  end;
+
   {Enter the memory manager: block scans may not be performed now}
   StartChangingFullDebugModeBlock;
   try
     {We need extra space for (a) The debug header, (b) the block debug trailer
      and (c) the trailing block size pointer for free blocks}
-    Result := FastGetMem(ASize + FullDebugBlockOverhead {$IFDEF LogLockContention}, LCollector{$ENDIF});
+    {A request within FullDebugBlockOverhead of the top of the size type makes
+     that addition wrap, and the wrapped total is a small number the allocator
+     will serve, so the caller would be handed a block far smaller than it asked
+     for and the footer would then be written outside it. The size is refused
+     before the addition rather than after, since FastGetMem never sees the
+     value the caller actually named.
+
+     The test is written in the parameter's own type, so the addition below is
+     exact rather than merely harmless. The type is unsigned under FreePascal
+     and signed under Delphi, where a size that has already wrapped arrives as
+     a negative number and one just below High(NativeInt) would overflow the
+     addition itself. Both are refused here, which is what lets this unit be
+     compiled with overflow checking on: it sets no overflow check directive of
+     its own and takes whatever the program compiling it sets.}
+{$IFDEF FPC}
+    LSizeRefused := ASize > (High(ptruint) - FullDebugBlockOverhead);
+{$ELSE}
+    LSizeRefused := (ASize < 0) or (ASize > (High(NativeInt) - NativeInt(FullDebugBlockOverhead)));
+{$ENDIF}
+    if LSizeRefused then
+      Result := nil
+    else
+      Result := FastGetMem(ASize + FullDebugBlockOverhead {$IFDEF LogLockContention}, LCollector{$ENDIF});
     if Result <> nil then
     begin
       {Large blocks are always newly allocated (and never reused), so checking
@@ -16170,10 +17270,13 @@ begin
         Result := nil;
       end;
     end
-    else
+    else if not LSizeRefused then
     begin
       {The process ran out of address space:  Release the address space slack so that some subsequent GetMem calls will
-      succeed in order for any error logging, etc. to complete successfully.}
+      succeed in order for any error logging, etc. to complete successfully.
+      A size the guard above refused never reached the allocator, so it says
+      nothing about the address space and must not spend the slack, which is
+      reserved so that a later genuine failure can still be reported.}
       if AddressSpaceSlackPtr <> nil then
       begin
         VirtualFree(AddressSpaceSlackPtr, 0, MEM_RELEASE);
@@ -16262,6 +17365,22 @@ var
   LActualBlock: PFullDebugBlockHeader;
   LBlockHeader: NativeUInt;
 begin
+{$IFDEF fpc}
+  {The FreePascal runtime frees a nil pointer without filtering it out first, so
+   the allocator has to accept it. TFPSList.Destroy, for example, calls FreeMem
+   on its item array even when the list never allocated one. The header has to be
+   left unread in that case: PByte(nil) - SizeOf(TFullDebugBlockHeader) is a wild
+   address and the checksum would be read from it. FastFreeMem starts with the
+   same guard. The guard sits above the memory pool scan deliberately: freeing
+   nil touches no block, so a scan here can only report a corruption that the
+   preceding operation already had its own scan for, and the finalization path
+   that reaches this guard frees nil repeatedly.}
+  if APointer = nil then
+  begin
+    Result := 0;
+    Exit;
+  end;
+{$ENDIF}
   {Scan the entire memory pool first?}
   if FullDebugModeScanMemoryPoolBeforeEveryOperation then
     ScanMemoryPoolForCorruptions;
@@ -16335,6 +17454,25 @@ var
   LMoveSize, LBlockSpace: NativeUInt;
   LActualBlock, LNewActualBlock: PFullDebugBlockHeader;
 begin
+{$IFDEF fpc}
+  {The FreePascal runtime calls ReAllocMem with a nil pointer to mean "allocate"
+   and with a size of zero to mean "free", so both have to be handled before the
+   block header is read. FastReallocMem starts with the same two guards.}
+  if APointer = nil then
+  begin
+    if ANewSize <> 0 then
+      APointer := DebugGetMem(ANewSize);
+    Result := APointer;
+    Exit;
+  end
+  else if ANewSize = 0 then
+  begin
+    DebugFreeMem(APointer);
+    APointer := nil;
+    Result := APointer;
+    Exit;
+  end;
+{$ENDIF}
   {Scan the entire memory pool first?}
   if FullDebugModeScanMemoryPoolBeforeEveryOperation then
     ScanMemoryPoolForCorruptions;
@@ -16344,11 +17482,32 @@ begin
   {Is the debug info surrounding the block valid?}
   if CheckBlockBeforeFreeOrRealloc(LActualBlock, boReallocMem) then
   begin
+    {The 32-bit assembly language System.AllocMem and System._ReallocMem let through negative size requests.
+    Additionally, both the 32-bit and 64-bit paths are vulnerable to bad size requests when called from
+    System.ReallocMemory.}
+    if ANewSize < 0 then
+    begin
+      Result := nil;
+      Exit;
+    end;
     {Get the current block size}
     LBlockSpace := GetAvailableSpaceInBlock(LActualBlock);
     {Can the block fit? We need space for the debug overhead and the block header
-     of the next block}
-    if LBlockSpace < (NativeUInt(ANewSize) + FullDebugBlockOverhead) then
+     of the next block. The same addition wraps here, and a wrapped total reads
+     as a size the existing block can already hold, so the block would be kept
+     and the caller told that its enormous request had been served in place. A
+     size that cannot have the overhead added to it is sent down the allocate
+     path instead, where DebugGetMem refuses it and the existing nil handling
+     reports the failure. The first test is again in the parameter's own type,
+     and it short-circuits, so the addition in the last operand is reached only
+     for a size it fits.}
+    if
+{$IFDEF FPC}
+      (ANewSize > (High(ptruint) - FullDebugBlockOverhead))
+{$ELSE}
+      (ANewSize < 0) or (ANewSize > (High(NativeInt) - NativeInt(FullDebugBlockOverhead)))
+{$ENDIF}
+      or (LBlockSpace < (NativeUInt(ANewSize) + FullDebugBlockOverhead)) then
     begin
       {Get a new block of the requested size.}
       Result := DebugGetMem(ANewSize);
@@ -16402,13 +17561,18 @@ begin
           OnDebugReallocMemStart(LActualBlock, ANewSize);
         {$ENDIF}
         {Clear all data after the new end of the block up to the old end of the
-         block, including the trailer.}
-        DebugFillMem(Pointer(PByte(APointer) + NativeUInt(ANewSize) + SizeOf(NativeUInt))^,
-          NativeInt(LActualBlock^.UserSize) - ANewSize,
+         block, including the trailer. There is nothing to clear when the block
+         is being grown in place, which is when the new size is the larger of
+         the two. DebugFillMem already writes nothing for a count that is not
+         positive, so this test states that intent in Pascal rather than leaving
+         it to be read out of the assembler.}
+        if LActualBlock^.UserSize > NativeUInt(ANewSize) then
+          DebugFillMem(Pointer(PByte(APointer) + NativeUInt(ANewSize) + SizeOf(NativeUInt))^,
+            NativeInt(LActualBlock^.UserSize) - ANewSize,
 {$IFNDEF CatchUseOfFreedInterfaces}
-          NativeUInt(DebugFillPattern));
+            NativeUInt(DebugFillPattern));
 {$ELSE}
-          RotateRight(NativeUInt(@VMTBadInterface), (ANewSize and (SizeOf(Pointer) - 1)) * 8));
+            RotateRight(NativeUInt(@VMTBadInterface), (ANewSize and (SizeOf(Pointer) - 1)) * 8));
 {$ENDIF}
         {Update the user size}
         LActualBlock^.UserSize := ANewSize;
@@ -16430,16 +17594,85 @@ begin
   begin
     Result := nil;
   end;
+{$IFDEF fpc}
+  {Under FreePascal the pointer is a var parameter and the caller takes the new
+   value from it rather than from the function result, so it has to be updated
+   here. FastReallocMem ends with the same assignment for the same reason.}
+  APointer := Result;
+{$ENDIF}
 end;
 
 {Allocates a block and fills it with zeroes}
-function DebugAllocMem(ASize: {$IFDEF XE2AndUp}NativeInt{$ELSE}Cardinal{$ENDIF}): Pointer;
+function DebugAllocMem(ASize: {$IFDEF XE2AndUp}NativeInt{$ELSE}{$IFDEF fpc}NativeUInt{$ELSE}Cardinal{$ENDIF}{$ENDIF}): Pointer;
 begin
   Result := DebugGetMem(ASize);
   {Clear the block}
   if Result <>  nil then
     FillChar(Result^, ASize, 0);
 end;
+
+{$IFDEF fpc}
+{Frees a block that was allocated by DebugGetMem, for the FreememSize entry of
+ the FreePascal memory manager. The size is ignored, exactly as FastFreeMemSize
+ ignores it, because a block cannot be freed partially.}
+function DebugFreeMemSize(APointer: Pointer; ASize: NativeUInt): NativeUInt;
+begin
+  if ASize = 0 then
+  begin
+    Result := 0;
+    Exit;
+  end;
+  Result := DebugFreeMem(APointer);
+end;
+
+{Returns the size of a block that was allocated by DebugGetMem, for the MemSize
+ entry of the FreePascal memory manager.
+
+ This returns the size that was requested, where FastMemSize returns the space
+ physically available in the block. The bytes past the requested size hold the
+ debug footer, so a caller that treated the available space as usable would
+ overwrite the footer and then be reported as having corrupted the block. Under
+ FullDebugMode the requested size is the only size the caller is entitled to.
+
+ Zero is returned unless the header checksum verifies, the footer still holds
+ the inverted checksum, and the block is one this memory manager has handed out
+ and has not taken back. A freed block keeps a valid header checksum, since
+ DebugFreeMem recalculates it after marking the block free, so the header alone
+ would report a plausible size for a pointer that is already dangling. The
+ caller then reallocates rather than writing into a block whose recorded size
+ cannot be trusted, and that reallocation reports the real fault through
+ CheckBlockBeforeFreeOrRealloc.
+
+ CheckBlockBeforeFreeOrRealloc itself is deliberately not called here. It logs a
+ block error as a side effect, which does not belong in a query, and it walks
+ the fill pattern to the end of the block, which is proportional to the block
+ size on a call the runtime makes every time a string grows. The three checks
+ above are all constant time.
+
+ No block scan lock is taken. This only reads the header of a block that the
+ caller owns, it modifies nothing, and taking the lock would put a query on the
+ same blocking protocol as the memory pool scan.}
+function DebugMemSize(APointer: Pointer): NativeUInt;
+var
+  LActualBlock: PFullDebugBlockHeader;
+  LHeaderCheckSum: NativeUInt;
+begin
+  Result := 0;
+  if APointer = nil then
+    Exit;
+  LActualBlock := PFullDebugBlockHeader(PByte(APointer) - SizeOf(TFullDebugBlockHeader));
+  LHeaderCheckSum := CalculateHeaderCheckSum(LActualBlock);
+  if LHeaderCheckSum <> LActualBlock^.HeaderCheckSum then
+    Exit;
+  {The user size is only trustworthy once the header checksum has verified, so
+   the footer is located with it only after that test}
+  if PNativeUInt(PByte(LActualBlock) + SizeOf(TFullDebugBlockHeader) + LActualBlock^.UserSize)^ <> (not LHeaderCheckSum) then
+    Exit;
+  if LActualBlock^.AllocatedByRoutine <> Pointer(@DebugGetMem) then
+    Exit;
+  Result := LActualBlock^.UserSize;
+end;
+{$ENDIF}
 
 {Raises a runtime error if a memory corruption was encountered. Subroutine for
  InternalScanMemoryPool and InternalScanSmallBlockPool.}
@@ -17131,7 +18364,7 @@ function GetRegisteredMemoryLeaks: TRegisteredMemoryLeaks;
   begin
     while AEntry <> nil do
     begin
-      LInd := Length(Result);
+      LInd := Integer(Length(Result));
       SetLength(Result, LInd + 1);
       {Add the entry}
 {$IFNDEF FullDebugMode}
@@ -17326,7 +18559,7 @@ begin
           begin
             {Step through all the blocks in the small block pool}
             LPSmallBlockPool := LPMediumBlock;
-            {Get the useable size inside a block}
+            {Get the usable size inside a block}
             LBlockSize := LPSmallBlockPool^.BlockType^.BlockSize - BlockHeaderSize - TotalDebugOverhead;
             {Get the first and last pointer for the pool}
             GetFirstAndLastSmallBlockInPool(LPSmallBlockPool, LCurPtr, LEndPtr);
@@ -17508,7 +18741,7 @@ end;
 
 {This function is only needed to copy with an error given when using
 the "typed @ operator" compiler option. We are having just one typecast
-in this function to avoid using typecasts throught the entire program.}
+in this function to avoid using typecasts throughout the entire program.}
 function GetNodeListFromNode(ANode: PMemoryLogNode): PMemoryLogNodes;
   {$IFDEF FASTMM4_ALLOW_INLINES}inline;{$ENDIF}
 begin
@@ -17617,7 +18850,7 @@ begin
   end;
 end;
 
-{Writes a log file containing a summary of the memory mananger state and a summary of allocated blocks grouped by
+{Writes a log file containing a summary of the memory manager state and a summary of allocated blocks grouped by
  class. The file will be saved in UTF-8 encoding (in supported Delphi versions). Returns True on success. }
 function LogMemoryManagerStateToFile(const AFileName: string; const AAdditionalDetails: string {$IFNDEF FPC}= ''{$ENDIF}): Boolean;
 const
@@ -17687,13 +18920,13 @@ begin
           LPMsg := @(LMsgBuffer[0]);
           LPInitialMsgPtr := LPMsg;
           LInitialSize := (SizeOf(LMsgBuffer) div SizeOf(LMsgBuffer[0]))-1;
-          LPMsg := AppendStringToBuffer(LogStateHeaderMsg, LPMsg, Length(LogStateHeaderMsg), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-          LPMsg := NativeUIntToStrBuf(LMemoryManagerUsageSummary.AllocatedBytes shr 10, LPMsg, LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-          LPMsg := AppendStringToBuffer(LogStateAllocatedMsg, LPMsg, Length(LogStateAllocatedMsg), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-          LPMsg := NativeUIntToStrBuf(LMemoryManagerUsageSummary.OverheadBytes shr 10, LPMsg, LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-          LPMsg := AppendStringToBuffer(LogStateOverheadMsg, LPMsg, Length(LogStateOverheadMsg), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-          LPMsg := NativeUIntToStrBuf(Round(LMemoryManagerUsageSummary.EfficiencyPercentage), LPMsg, LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-          LPMsg := AppendStringToBuffer(LogStateEfficiencyMsg, LPMsg, Length(LogStateEfficiencyMsg), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+          LPMsg := AppendStringToBuffer(LogStateHeaderMsg, LPMsg, Length(LogStateHeaderMsg), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+          LPMsg := NativeUIntToStrBuf(LMemoryManagerUsageSummary.AllocatedBytes shr 10, LPMsg, Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+          LPMsg := AppendStringToBuffer(LogStateAllocatedMsg, LPMsg, Length(LogStateAllocatedMsg), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+          LPMsg := NativeUIntToStrBuf(LMemoryManagerUsageSummary.OverheadBytes shr 10, LPMsg, Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+          LPMsg := AppendStringToBuffer(LogStateOverheadMsg, LPMsg, Length(LogStateOverheadMsg), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+          LPMsg := NativeUIntToStrBuf(NativeUInt(Round(LMemoryManagerUsageSummary.EfficiencyPercentage)), LPMsg, Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+          LPMsg := AppendStringToBuffer(LogStateEfficiencyMsg, LPMsg, Length(LogStateEfficiencyMsg), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
           {Log the allocation detail}
           for LInd := LPLogInfo^.NodeCount - 1 downto 0 do
           begin
@@ -17701,29 +18934,29 @@ begin
             {Add the allocated size}
             LPMsg^ := ' ';
             Inc(LPMsg);
-            LPMsg := NativeUIntToStrBuf(LPNode^.TotalMemoryUsage, LPMsg, LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-            LPMsg := AppendStringToBuffer(BytesMessage, LPMsg, Length(BytesMessage), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+            LPMsg := NativeUIntToStrBuf(LPNode^.TotalMemoryUsage, LPMsg, Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+            LPMsg := AppendStringToBuffer(BytesMessage, LPMsg, Length(BytesMessage), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
             {Add the class type}
             case NativeUInt(LPNode^.ClassPtr) of
               {Unknown}
               0:
               begin
-                LPMsg := AppendStringToBuffer(UnknownClassNameMsg, LPMsg, Length(UnknownClassNameMsg), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+                LPMsg := AppendStringToBuffer(UnknownClassNameMsg, LPMsg, Length(UnknownClassNameMsg), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
               end;
               {AnsiString}
               1:
               begin
-                LPMsg := AppendStringToBuffer(AnsiStringBlockMessage, LPMsg, Length(AnsiStringBlockMessage), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+                LPMsg := AppendStringToBuffer(AnsiStringBlockMessage, LPMsg, Length(AnsiStringBlockMessage), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
               end;
               {UnicodeString}
               2:
               begin
-                LPMsg := AppendStringToBuffer(UnicodeStringBlockMessage, LPMsg, Length(UnicodeStringBlockMessage), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+                LPMsg := AppendStringToBuffer(UnicodeStringBlockMessage, LPMsg, Length(UnicodeStringBlockMessage), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
               end;
               {Classes}
             else
               begin
-                LPMsg := AppendClassNameToBuffer(LPNode^.ClassPtr, LPMsg, LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+                LPMsg := AppendClassNameToBuffer(LPNode^.ClassPtr, LPMsg, Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
               end;
             end;
             {Add the count}
@@ -17733,16 +18966,16 @@ begin
             Inc(LPMsg);
             LPMsg^ := ' ';
             Inc(LPMsg);
-            LPMsg := NativeUIntToStrBuf(LPNode^.InstanceCount, LPMsg, LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-            LPMsg := AppendStringToBuffer(AverageSizeLeadText, LPMsg, Length(AverageSizeLeadText), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-            LPMsg := NativeUIntToStrBuf(LPNode^.TotalMemoryUsage div LPNode^.InstanceCount, LPMsg, LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
-            LPMsg := AppendStringToBuffer(AverageSizeTrailingText, LPMsg, Length(AverageSizeTrailingText), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+            LPMsg := NativeUIntToStrBuf(LPNode^.InstanceCount, LPMsg, Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+            LPMsg := AppendStringToBuffer(AverageSizeLeadText, LPMsg, Length(AverageSizeLeadText), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+            LPMsg := NativeUIntToStrBuf(LPNode^.TotalMemoryUsage div LPNode^.InstanceCount, LPMsg, Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
+            LPMsg := AppendStringToBuffer(AverageSizeTrailingText, LPMsg, Length(AverageSizeTrailingText), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
             {Flush the buffer?}
             LUMsg := NativeUInt(LPMsg);
             LUBuf := NativeUInt(@LMsgBuffer);
             if LUMsg > LUBuf then
             begin
-              LBufferSpaceUsed := LUMsg - LUBuf;
+              LBufferSpaceUsed := Cardinal(LUMsg - LUBuf);
               if LBufferSpaceUsed > (MsgBufferSize - MaxLineLength) then
               begin
                 LBytesWritten := 0;
@@ -17753,14 +18986,14 @@ begin
           end;
           if AAdditionalDetails <> '' then
           begin
-            LPMsg := AppendStringToBuffer(LogStateAdditionalInfoMsg, LPMsg, Length(LogStateAdditionalInfoMsg), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+            LPMsg := AppendStringToBuffer(LogStateAdditionalInfoMsg, LPMsg, Length(LogStateAdditionalInfoMsg), Cardinal(LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr)));
           end;
           {Flush any remaining bytes}
           LUMsg := NativeUInt(LPMsg);
           LUBuf := NativeUInt(@LMsgBuffer);
           if LUMsg > LUBuf then
           begin
-            LBufferSpaceUsed :=  LUMsg - LUBuf;
+            LBufferSpaceUsed := Cardinal(LUMsg - LUBuf);
             WriteFile(LFileHandle, LMsgBuffer, LBufferSpaceUsed, LBytesWritten, nil);
           end;
           {Write the additional info}
@@ -17918,19 +19151,19 @@ var
     LPLeakedClasses: PLeakedClasses;
     LSmallBlockSize: Cardinal;
   begin
-    {Get the useable size inside a block}
+    {Get the usable size inside a block}
     LSmallBlockSize := APSmallBlockPool^.BlockType^.BlockSize - BlockHeaderSize;
   {$IFDEF FullDebugMode}
     Dec(LSmallBlockSize, FullDebugBlockOverhead);
   {$ENDIF}
     {Get the block type index}
-    LBlockTypeIndex := (UIntPtr(APSmallBlockPool^.BlockType) - UIntPtr(@SmallBlockTypes[0]))
+    LBlockTypeIndex := Cardinal((UIntPtr(APSmallBlockPool^.BlockType) - UIntPtr(@SmallBlockTypes[0]))
 {$IFDEF SmallBlockTypeRecSizeIsPowerOf2}
       shr SmallBlockTypeRecSizePowerOf2
 {$ELSE}
       div SmallBlockTypeRecSize
 {$ENDIF}
-    ;
+    );
     LPLeakedClasses := @LSmallBlockLeaks[LBlockTypeIndex];
     {Get the first and last pointer for the pool}
     LCurPtr := nil;
@@ -18211,7 +19444,7 @@ begin
             {Need to add the header?}
             if not LSmallLeakHeaderAdded then
             begin
-              LMsgPtr := AppendStringToBuffer(SmallLeakDetail, LMsgPtr, Length(SmallLeakDetail), LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+              LMsgPtr := AppendStringToBuffer(SmallLeakDetail, LMsgPtr, Length(SmallLeakDetail), Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
               LSmallLeakHeaderAdded := True;
             end;
             {Need to add the size header?}
@@ -18221,15 +19454,15 @@ begin
               Inc(LMsgPtr);
               LMsgPtr^ := #10;
               Inc(LMsgPtr);
-              LMsgPtr := NativeUIntToStrBuf(LPreviousBlockSize + 1, LMsgPtr, LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+              LMsgPtr := NativeUIntToStrBuf(LPreviousBlockSize + 1, LMsgPtr, Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
               LMsgPtr^ := ' ';
               Inc(LMsgPtr);
               LMsgPtr^ := '-';
               Inc(LMsgPtr);
               LMsgPtr^ := ' ';
               Inc(LMsgPtr);
-              LMsgPtr := NativeUIntToStrBuf(LThisBlockSize, LMsgPtr, LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
-              LMsgPtr := AppendStringToBuffer(BytesMessage, LMsgPtr, Length(BytesMessage), LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+              LMsgPtr := NativeUIntToStrBuf(LThisBlockSize, LMsgPtr, Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
+              LMsgPtr := AppendStringToBuffer(BytesMessage, LMsgPtr, Length(BytesMessage), Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
               LBlockSizeHeaderAdded := True;
             end
             else
@@ -18244,17 +19477,17 @@ begin
               {Unknown}
               0:
               begin
-                LMsgPtr := AppendStringToBuffer(UnknownClassNameMsg, LMsgPtr, Length(UnknownClassNameMsg), LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+                LMsgPtr := AppendStringToBuffer(UnknownClassNameMsg, LMsgPtr, Length(UnknownClassNameMsg), Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
               end;
               {AnsiString}
               1:
               begin
-                LMsgPtr := AppendStringToBuffer(AnsiStringBlockMessage, LMsgPtr, Length(AnsiStringBlockMessage), LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+                LMsgPtr := AppendStringToBuffer(AnsiStringBlockMessage, LMsgPtr, Length(AnsiStringBlockMessage), Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
               end;
               {UnicodeString}
               2:
               begin
-                LMsgPtr := AppendStringToBuffer(UnicodeStringBlockMessage, LMsgPtr, Length(UnicodeStringBlockMessage), LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+                LMsgPtr := AppendStringToBuffer(UnicodeStringBlockMessage, LMsgPtr, Length(UnicodeStringBlockMessage), Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
               end;
               {Classes}
             else
@@ -18273,7 +19506,7 @@ begin
                 else
                 begin
                 {$ENDIF}
-                  LMsgPtr := AppendClassNameToBuffer(LSmallBlockLeaks[LBlockTypeInd][LClassInd].ClassPointer, LMsgPtr, LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+                  LMsgPtr := AppendClassNameToBuffer(LSmallBlockLeaks[LBlockTypeInd][LClassInd].ClassPointer, LMsgPtr, Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
                 {$IFDEF CheckCppObjectTypeEnabled}
                 end;
                 {$ENDIF}
@@ -18286,7 +19519,7 @@ begin
             Inc(LMsgPtr);
             LMsgPtr^ := ' ';
             Inc(LMsgPtr);
-            LMsgPtr := NativeUIntToStrBuf(LSmallBlockLeaks[LBlockTypeInd][LClassInd].NumLeaks, LMsgPtr, LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+            LMsgPtr := NativeUIntToStrBuf(LSmallBlockLeaks[LBlockTypeInd][LClassInd].NumLeaks, LMsgPtr, Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
           end;
         end;
         LPreviousBlockSize := LThisBlockSize;
@@ -18307,7 +19540,7 @@ begin
           Inc(LMsgPtr);
         end;
         {Add the medium/large block leak message}
-        LMsgPtr := AppendStringToBuffer(LargeLeakDetail, LMsgPtr, Length(LargeLeakDetail), LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+        LMsgPtr := AppendStringToBuffer(LargeLeakDetail, LMsgPtr, Length(LargeLeakDetail), Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
         {List all the blocks}
         for LBlockInd := 0 to LNumMediumAndLargeLeaks - 1 do
         begin
@@ -18318,7 +19551,7 @@ begin
             LMsgPtr^ :=  ' ';
             Inc(LMsgPtr);
           end;
-          LMsgPtr := NativeUIntToStrBuf(LMediumAndLargeBlockLeaks[LBlockInd], LMsgPtr, LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+          LMsgPtr := NativeUIntToStrBuf(LMediumAndLargeBlockLeaks[LBlockInd], LMsgPtr, Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
           {Is there still space in the message buffer? Reserve space for the
            message footer.}
           if LMsgPtr > @LLeakMessage[High(LLeakMessage) - MaxFileNameLengthDouble] then
@@ -18327,12 +19560,12 @@ begin
       end;
   {$IFDEF LogErrorsToFile}
        {Set the message footer}
-        LMsgPtr := AppendStringToBuffer(LeakMessageFooter, LMsgPtr, Length(LeakMessageFooter), LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+        LMsgPtr := AppendStringToBuffer(LeakMessageFooter, LMsgPtr, Length(LeakMessageFooter), Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
         {Append the message to the memory errors file}
         AppendEventLog(@LLeakMessage[0], UIntPtr(LMsgPtr) - UIntPtr(@LLeakMessage[1]));
   {$ELSE}
       {Set the message footer}
-      AppendStringToBuffer(LeakMessageFooter, LMsgPtr, Length(LeakMessageFooter), LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr));
+      AppendStringToBuffer(LeakMessageFooter, LMsgPtr, Length(LeakMessageFooter), Cardinal(LInitialSize-NativeUInt(LMsgPtr-LPInitialPtr)));
   {$ENDIF}
   {$IFDEF UseOutputDebugString}
       OutputDebugStringA(LLeakMessage);
@@ -18417,17 +19650,17 @@ begin
       if (LMediumBlockHeader and IsFreeBlockFlag) = 0 then
       begin
         {Get the block size}
-        LMediumBlockSize := LMediumBlockHeader and DropMediumAndLargeFlagsMask;
+        LMediumBlockSize := Cardinal(LMediumBlockHeader and DropMediumAndLargeFlagsMask);
         if (LMediumBlockHeader and IsSmallBlockPoolInUseFlag) <> 0 then
         begin
           {Get the block type index}
-          LBlockTypeIndex := (UIntPtr(PSmallBlockPoolHeader(LPMediumBlock)^.BlockType) - UIntPtr(@SmallBlockTypes[0]))
+          LBlockTypeIndex := Cardinal((UIntPtr(PSmallBlockPoolHeader(LPMediumBlock)^.BlockType) - UIntPtr(@SmallBlockTypes[0]))
     {$IFDEF SmallBlockTypeRecSizeIsPowerOf2}
           shr SmallBlockTypeRecSizePowerOf2
     {$ELSE}
           div SmallBlockTypeRecSize
     {$ENDIF}
-          ;
+          );
           {Subtract from medium block usage}
           Dec(AMemoryManagerState.ReservedMediumBlockAddressSpace, LMediumBlockSize);
           {Add it to the reserved space for the block size}
@@ -18629,7 +19862,16 @@ begin
       if VirtualQuery(Pointer(LIndNUI * 65536), LMBI, SizeOf(LMBI)) = 0 then
       begin
         {VirtualQuery may fail for addresses >2GB if a large address space is
-         not enabled.}
+         not enabled. A 32-bit process is given 2GB of user address space and
+         reaches above it only when its image is marked large address aware,
+         and on 32-bit Windows only if the system was also booted with /3GB or
+         increaseuserva, which raises the limit to at most 3GB. On 64-bit
+         Windows the flag alone gives such a process 4GB. Where neither
+         condition is met the remainder of the map is reported as system
+         reserved. The two rules are stated in the Microsoft documentation at
+         https://learn.microsoft.com/en-us/windows/win32/memory/memory-limits-for-windows-releases
+         and https://learn.microsoft.com/en-us/windows/win32/memory/4-gigabyte-tuning
+         see also https://stackoverflow.com/a/44863475/6910868 }
         LCharToFill := AnsiChar(csSysReserved);
         FillChar(AMemoryMap[LIndNUI], 65536 - LIndNUI, LCharToFill);
         Break;
@@ -18733,20 +19975,20 @@ begin
       {Get the block header}
       LMediumBlockHeader := PNativeUInt(PByte(LPMediumBlock) - BlockHeaderSize)^;
       {Get the block size}
-      LMediumBlockSize := LMediumBlockHeader and DropMediumAndLargeFlagsMask;
+      LMediumBlockSize := Cardinal(LMediumBlockHeader and DropMediumAndLargeFlagsMask);
       {Is the block in use?}
       if (LMediumBlockHeader and IsFreeBlockFlag) = 0 then
       begin
         if (LMediumBlockHeader and IsSmallBlockPoolInUseFlag) <> 0 then
         begin
           {Get the block type index}
-          LBlockTypeIndex := (UIntPtr(PSmallBlockPoolHeader(LPMediumBlock)^.BlockType) - UIntPtr(@SmallBlockTypes[0]))
+          LBlockTypeIndex := Cardinal((UIntPtr(PSmallBlockPoolHeader(LPMediumBlock)^.BlockType) - UIntPtr(@SmallBlockTypes[0]))
     {$IFDEF SmallBlockTypeRecSizeIsPowerOf2}
           shr SmallBlockTypeRecSizePowerOf2
     {$ELSE}
           div SmallBlockTypeRecSize
     {$ENDIF}
-          ;
+          );
           {Get the usage in the block}
           LSmallBlockUsage := PSmallBlockPoolHeader(LPMediumBlock)^.BlocksInUse
             * SmallBlockTypes[LBlockTypeIndex].BlockSize;
@@ -19267,7 +20509,7 @@ const
 it in bits 63-32 under 64-bit, although the xgetbv instruction only accepts
 32-bits from the ECX/RCX register even under 64-bit mode}
 
-{$IFDEF 64bit}
+{$IFDEF 64BIT}
   {$IFNDEF FPC}
   { The following compilers do not understand the XGETBV instruction:
     - The 32-bit Delphi Tokyo 10.2 assembler;
@@ -19282,7 +20524,7 @@ it in bits 63-32 under 64-bit, although the xgetbv instruction only accepts
 {$IFNDEF PurePascal}
 function GetCpuXCR(Arg: NativeUint): Int64; assembler;
 asm
- {$IFDEF 64bit}
+ {$IFDEF 64BIT}
 
 {$IFDEF unix}
 
@@ -19335,13 +20577,16 @@ var
   LErrorMessageTitle: array[0..MaxDisplayMessageLength-1] of AnsiChar;
 {$ENDIF}
 {$IFNDEF POSIX}
+{$IFNDEF FPC}
+{$IFNDEF IgnoreMemoryAllocatedBefore}
 var
   HeapTotalAllocated: NativeUInt;
+{$ENDIF}
+{$ENDIF}
 {$ENDIF}
 var
   LMemoryManagerSet: Boolean;
 begin
-  LMemoryManagerSet := False;
   {Default to error}
   Result := False;
 {$IFDEF FullDebugMode}
@@ -19350,9 +20595,9 @@ begin
   {Should FastMM be installed only if the FastMM_FullDebugMode.dll file is
    available?}
   if ( FullDebugModeDLL = 0 )
-      {$IF Defined( FullDebugMode ) AND Defined( LoadDebugDLLDynamically ) AND Defined( MemoryLoadLibrarySupport )}
-      AND ( MemoryResourceExists( {$IFNDEF 64Bit}'FastMM_FullDebugMode'{$ELSE}'FastMM_FullDebugMode64'{$ENDIF} ) = 0 ) 
-      {$IFEND} then
+      {$IFDEF FullDebugMode}{$IFDEF LoadDebugDLLDynamically}{$IFDEF MemoryLoadLibrarySupport}
+      AND ( MemoryResourceExists( {$IFNDEF 64BIT}'FastMM_FullDebugMode'{$ELSE}'FastMM_FullDebugMode64'{$ENDIF} ) = 0 )
+      {$ENDIF}{$ENDIF}{$ENDIF} then
     Exit;
     {$ENDIF}
   {$ENDIF}
@@ -19394,7 +20639,11 @@ begin
   end;
 
 {$IFNDEF POSIX}
+{$IFNDEF FPC}
+{$IFNDEF IgnoreMemoryAllocatedBefore}
   HeapTotalAllocated := GetHeapStatus.TotalAllocated;
+{$ENDIF}
+{$ENDIF}
 { In FreePascal, we cannot rely on HeapTotalAllocated to check whether FastMM4
 is the first unit and no memory have been allocated before, by another memory
 manager, because the initialization section of the "system.pp" unit of
@@ -19406,6 +20655,7 @@ See https://bugs.freepascal.org/view.php?id=38391 for more details.
 Please double-check that the FastMM4 unit is the first unit in the units ("uses")
 list of your .lpr file (or any other main file where you define project
 units). }
+{$IFNDEF FPC}
 {$IFNDEF IgnoreMemoryAllocatedBefore}
   if HeapTotalAllocated <> 0 then
   begin
@@ -19426,6 +20676,7 @@ units). }
   {$ENDIF}
     Exit;
   end;
+{$ENDIF}
 {$ENDIF}
 {$ENDIF}
   {All OK}
@@ -19490,8 +20741,10 @@ var
   LPSmallBlockPoolHeader: PSmallBlockPoolHeader;
   LPSmallBlockType: PSmallBlockType;
 {$IFDEF Use_GetEnabledXStateFeatures_WindowsAPICall}
+{$IFDEF USE_CPUID}
   FGetEnabledXStateFeatures: TGetEnabledXStateFeatures;
   EnabledXStateFeatures: Int64;
+{$ENDIF}
 {$ENDIF}
 
 {$IFDEF USE_CPUID}
@@ -19499,7 +20752,7 @@ var
   CpuXCR0: Int64;
 {$ENDIF}
   MaxInputValueBasic: Cardinal;
-  LReg0, LReg1, LReg5, LReg7_0: TCpuIdRegisters;
+  LReg0, LReg1, {$IFDEF EnableWaitPKG}LReg5,{$ENDIF} LReg7_0: TCpuIdRegisters;
 {$ENDIF}
 
   LInd,
@@ -19527,6 +20780,19 @@ var
   {$ENDIF}
   {$ENDIF}
 begin
+
+  {Runtime struct layout verification: NextPartiallyFreePool must be at the
+   same offset in TSmallBlockType and TSmallBlockPoolHeader, otherwise the
+   partially-free pool linked list operations corrupt memory.}
+  if NativeUInt(@PSmallBlockType(nil)^.NextPartiallyFreePool) <>
+     NativeUInt(@PSmallBlockPoolHeader(nil)^.NextPartiallyFreePool) then
+  begin
+{$IFNDEF SystemRunError}
+    System.Error(reInvalidOp);
+{$ELSE}
+    System.RunError(reInvalidOp);
+{$ENDIF}
+  end;
 
 {$IFNDEF DisablePauseAndSwitchToThread}
 {$IFNDEF POSIX}
@@ -19561,8 +20827,20 @@ ENDQOTE}
 
     with LReg0   do begin RegEAX := 0; RegEBX := 0; RegECX := 0; RegEDX := 0; end;
     with LReg1   do begin RegEAX := 0; RegEBX := 0; RegECX := 0; RegEDX := 0; end;
+{$IFDEF EnableWaitPKG}
     with LReg5   do begin RegEAX := 0; RegEBX := 0; RegECX := 0; RegEDX := 0; end;
+{$ENDIF}
     with LReg7_0 do begin RegEAX := 0; RegEBX := 0; RegECX := 0; RegEDX := 0; end;
+
+{$IFNDEF EnableWaitPKG}
+    {Explicit zero-initialization to silence FPC "read but nowhere assigned"
+     warnings when EnableWaitPKG is not defined. These fields are read by
+     GetFastMMCpuFeatures and GetFastMMCpuUserModeMonitorLineSizes but only
+     written inside the EnableWaitPKG detection path.}
+    FastMMCpuFeaturesB := 0;
+    FastMMCpuSmallestMonitorLineSize := 0;
+    FastMMCpuLargestMonitorLineSize := 0;
+{$ENDIF}
 
     GetCPUID(0, 0, LReg0);
     MaxInputValueBasic := LReg0.RegEax;
@@ -19631,7 +20909,7 @@ This is because the operating system would not save the registers and the states
       end;
 {$ENDIF EnableMMX}
 
-{$IFDEF 32bit}
+{$IFDEF 32BIT}
       if
         ((LReg1.RegEDX and (UnsignedBit shl 25)) <> 0)
   {$IFDEF Use_GetEnabledXStateFeatures_WindowsAPICall}
@@ -19639,11 +20917,11 @@ This is because the operating system would not save the registers and the states
   {$ENDIF}
       then
       begin
-  {$IFDEF 32bit_SSE}
+  {$IFDEF 32BIT_SSE}
         FastMMCpuFeaturesA := FastMMCpuFeaturesA or FastMMCpuFeatureSSE;
   {$ENDIF}
       end;
-{$ENDIF 32bit}
+{$ENDIF 32BIT}
 
 { Here is the Intel algorithm to detext AVX }
 { QUOTE from the Intel 64 and IA-32 Architectures Optimization Reference Manual
@@ -19777,7 +21055,7 @@ ENDQUOTE}
     the old size.}
 
 
-    {$IFDEF 32bit_SSE}
+    {$IFDEF 32BIT_SSE}
     {$IFNDEF unix}
     {$IFDEF USE_CPUID}
     // if we have SSE, use SSE copy
@@ -19785,16 +21063,16 @@ ENDQUOTE}
     if ((FastMMCpuFeaturesA and FastMMCpuFeatureSSE) <> 0) then
     begin
       case SmallBlockTypes[LInd].BlockSize of
-        24: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move20_32bit_SSE;
-        32: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move28_32bit_SSE;
-        40: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move36_32bit_SSE;
-        48: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move44_32bit_SSE;
-        56: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move52_32bit_SSE;
-        64: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move60_32bit_SSE;
-        72: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move68_32bit_SSE;
-        80: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move76_32bit_SSE;
-        88: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move84_32bit_SSE;
-        96: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move92_32bit_SSE;
+        24: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move20_32BIT_SSE;
+        32: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move28_32BIT_SSE;
+        40: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move36_32BIT_SSE;
+        48: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move44_32BIT_SSE;
+        56: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move52_32BIT_SSE;
+        64: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move60_32BIT_SSE;
+        72: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move68_32BIT_SSE;
+        80: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move76_32BIT_SSE;
+        88: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move84_32BIT_SSE;
+        96: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move92_32BIT_SSE;
       end;
     end;
     {$ENDIF}
@@ -19804,39 +21082,39 @@ ENDQUOTE}
     if not Assigned(SmallBlockTypes[LInd].UpsizeMoveProcedure) then
     begin
       case SmallBlockTypes[LInd].BlockSize of
-        {$IFDEF 32bit}
+        {$IFDEF 32BIT}
         8: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}Move4;
         {$ENDIF}
         {$IFNDEF Align32Bytes}
-        16: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32Bit}Move12{$ELSE}Move8{$ENDIF};
+        16: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32BIT}Move12{$ELSE}Move8{$ENDIF};
         {$IFNDEF Align16Bytes}
-        24: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32bit}Move20{$ELSE}Move16{$ENDIF};
+        24: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32BIT}Move20{$ELSE}Move16{$ENDIF};
         {$ENDIF Align16Bytes}
         {$ENDIF Align32Bytes}
 
-        32: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32Bit}Move28{$ELSE}Move24{$ENDIF};
+        32: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32BIT}Move28{$ELSE}Move24{$ENDIF};
 
         {$IFNDEF Align32Bytes}
         {$IFNDEF Align16Bytes}
-        40: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32bit}Move36{$ELSE}Move32{$ENDIF};
+        40: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32BIT}Move36{$ELSE}Move32{$ENDIF};
         {$ENDIF}
-        48: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32Bit}Move44{$ELSE}Move40{$ENDIF};
+        48: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32BIT}Move44{$ELSE}Move40{$ENDIF};
         {$IFNDEF Align16Bytes}
-        56: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32Bit}Move52{$ELSE}Move48{$ENDIF};
+        56: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32BIT}Move52{$ELSE}Move48{$ENDIF};
         {$ENDIF}
         {$ENDIF}
 
-        64: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32Bit}Move60{$ELSE}Move56{$ENDIF};
+        64: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32BIT}Move60{$ELSE}Move56{$ENDIF};
 
         {$IFNDEF Align32Bytes}
         {$IFNDEF Align16Bytes}
-        72: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32bit}Move68{$ELSE}Move64{$ENDIF};
+        72: SmallBlockTypes[LInd].UpsizeMoveProcedure := {$IFDEF FPC}@{$ENDIF}{$IFDEF 32BIT}Move68{$ELSE}Move64{$ENDIF};
         {$ENDIF}
         {$ENDIF}
       end;
     end;
 
-    {$IFDEF 64bit}
+    {$IFDEF 64BIT}
     {$IFDEF EnableFSRM}
     {$IFDEF USE_CPUID}
     if (FastMMCpuFeaturesA and FastMMCpuFeatureFSRM) <> 0 then
@@ -19869,7 +21147,7 @@ ENDQUOTE}
     {$ENDIF}
 
 
-{$IFDEF 64Bit}
+{$IFDEF 64BIT}
 {$IFDEF EnableAVX}
 
   {$IFDEF EnableAVX512}
@@ -20008,12 +21286,12 @@ ENDQUOTE}
     SmallBlockTypes[LInd].PreviousPartiallyFreePool := LPSmallBlockPoolHeader;
     SmallBlockTypes[LInd].NextPartiallyFreePool := LPSmallBlockPoolHeader;
     {Set the block size to block type index translation table}
-    for LSizeInd := (LPreviousBlockSize div SmallBlockGranularity) to (NativeUInt(SmallBlockTypes[LInd].BlockSize - 1) shr SmallBlockGranularityPowerOf2) do
+    for LSizeInd := (LPreviousBlockSize div SmallBlockGranularity) to Cardinal(NativeUInt(SmallBlockTypes[LInd].BlockSize - 1) shr SmallBlockGranularityPowerOf2) do
     begin
    {$IFDEF AllocSize2SmallBlockTypesPrecomputedOffsets}
-      AllocSz2SmlBlkTypOfsDivSclFctr[LSizeInd] := LInd shl (SmallBlockTypeRecSizePowerOf2 - MaximumCpuScaleFactorPowerOf2);
+      AllocSz2SmlBlkTypOfsDivSclFctr[LSizeInd] := Byte(LInd shl (SmallBlockTypeRecSizePowerOf2 - MaximumCpuScaleFactorPowerOf2));
    {$ELSE}
-      AllocSize2SmallBlockTypesIdx[LSizeInd] := LInd;
+      AllocSize2SmallBlockTypesIdx[LSizeInd] := Byte(LInd);
    {$ENDIF}
     end;
     {Cannot sequential feed yet: Ensure that the next address is greater than
@@ -20022,16 +21300,16 @@ ENDQUOTE}
     SmallBlockTypes[LInd].NextSequentialFeedBlockAddress := Pointer(1);
     {Get the mask to use for finding a medium block suitable for a block pool}
     LMinimumPoolSize :=
-      ((SmallBlockTypes[LInd].BlockSize * MinimumSmallBlocksPerPool
+      Cardinal(((SmallBlockTypes[LInd].BlockSize * MinimumSmallBlocksPerPool
         + SmallBlockPoolHeaderSize + MediumBlockGranularity - 1 - MediumBlockSizeOffset)
-      and MediumBlockGranularityMask) + MediumBlockSizeOffset;
+      and MediumBlockGranularityMask) + MediumBlockSizeOffset);
     if LMinimumPoolSize < MinimumMediumBlockSize then
     begin
       LMinimumPoolSize := MinimumMediumBlockSize;
     end;
     {Get the closest group number for the minimum pool size}
-    LGroupNumber := (LMinimumPoolSize - MinimumMediumBlockSize + MediumBlockBinsPerGroup * MediumBlockGranularity div 2)
-      shr (MediumBlockBinsPerGroupPowerOf2 + MediumBlockGranularityPowerOf2);
+    LGroupNumber := Cardinal((LMinimumPoolSize - MinimumMediumBlockSize + MediumBlockBinsPerGroup * MediumBlockGranularity div 2)
+      shr (MediumBlockBinsPerGroupPowerOf2 + MediumBlockGranularityPowerOf2));
     {Too large?}
     if LGroupNumber > 7 then
     begin
@@ -20039,14 +21317,14 @@ ENDQUOTE}
     end;
 
     {Set the bitmap}
-    LByte := Byte(UnsignedBit) shl LGroupNumber;
+    LByte := Byte(UnsignedBit shl LGroupNumber);
     SmallBlockTypes[LInd].AllowedGroupsForBlockPoolBitmap := NegByteMaskBit(LByte);
     {Set the minimum pool size}
-    SmallBlockTypes[LInd].MinimumBlockPoolSize := MinimumMediumBlockSize + (LGroupNumber shl (MediumBlockGranularityPowerOf2 + MediumBlockBinsPerGroupPowerOf2));
+    SmallBlockTypes[LInd].MinimumBlockPoolSize := Word(MinimumMediumBlockSize + (LGroupNumber shl (MediumBlockGranularityPowerOf2 + MediumBlockBinsPerGroupPowerOf2)));
     {Get the optimal block pool size}
-    LOptimalPoolSize := ((SmallBlockTypes[LInd].BlockSize * TargetSmallBlocksPerPool
+    LOptimalPoolSize := Cardinal(((SmallBlockTypes[LInd].BlockSize * TargetSmallBlocksPerPool
         + SmallBlockPoolHeaderSize + MediumBlockGranularity - 1 - MediumBlockSizeOffset)
-      and MediumBlockGranularityMask) + MediumBlockSizeOffset;
+      and MediumBlockGranularityMask) + MediumBlockSizeOffset);
     {Limit the optimal pool size to within range}
     if LOptimalPoolSize < OptimalSmallBlockPoolSizeLowerLimit then
     begin
@@ -20061,7 +21339,7 @@ ENDQUOTE}
     {Recalculate the optimal pool size to minimize wastage due to a partial
      last block.}
     SmallBlockTypes[LInd].OptimalBlockPoolSize :=
-      ((LBlocksPerPool * SmallBlockTypes[LInd].BlockSize + SmallBlockPoolHeaderSize + MediumBlockGranularity - 1 - MediumBlockSizeOffset) and MediumBlockGranularityMask) + MediumBlockSizeOffset;
+      Word(((LBlocksPerPool * SmallBlockTypes[LInd].BlockSize + SmallBlockPoolHeaderSize + MediumBlockGranularity - 1 - MediumBlockSizeOffset) and MediumBlockGranularityMask) + MediumBlockSizeOffset);
 {$IFDEF UseReleaseStack}
     for LSlot := 0 to NumStacksPerBlock - 1 do
       SmallBlockTypes[LInd].ReleaseStack[LSlot].Initialize(ReleaseStackSize, SizeOf(Pointer));
@@ -20177,7 +21455,7 @@ begin
   if not FastMMIsInstalled then
   begin
 {$IFDEF FullDebugMode}
-  {$IFDEF 32Bit}
+  {$IFDEF 32BIT}
     {Try to reserve the 64K block covering address $80808080 so pointers with DebugFillPattern will A/V}
     ReservedBlock := VirtualAlloc(Pointer(DebugReservedAddress), 65536, MEM_RESERVE, PAGE_NOACCESS);
     {Allocate the address space slack.}
@@ -20257,6 +21535,14 @@ begin
        NewMemoryManager.GetMem := @DebugGetMem;
        NewMemoryManager.FreeMem := @DebugFreeMem;
        NewMemoryManager.ReallocMem := @DebugReallocMem;
+       {The three entries below are set for the memory manager without
+        FullDebugMode just above. Leaving them nil here left the FreePascal
+        runtime calling address zero the first time it asked for the size of a
+        block, which is what a string or a dynamic array does as soon as it
+        grows.}
+       NewMemoryManager.FreememSize := @DebugFreeMemSize;
+       NewMemoryManager.AllocMem := @DebugAllocMem;
+       NewMemoryManager.MemSize := @DebugMemSize;
 {$ELSE}
        NewMemoryManager.GetMem := DebugGetMem;
        NewMemoryManager.FreeMem := DebugFreeMem;
@@ -20512,18 +21798,30 @@ end;
 
 procedure FinalizeMemoryManager;
 {$IFDEF SmallBlocksLockedCriticalSection}
+{$IFNDEF NeverUninstall}
 var
   LInd: Integer;
+{$ENDIF}
 {$ENDIF}
 begin
   {Restore the old memory manager if FastMM has been installed}
   if FastMMIsInstalled then
   begin
+  {Caveat: when NeverUninstall is defined together with UseReleaseStack
+   (e.g. Linux Delphi default, BCB IDE DLL, SoftInvalidFreeMem), the block
+   below is skipped: DestroyCleanupThread and CleanupReleaseStacks do not run.
+   This keeps release-stack buffers alive for late FreeMem pushes (their
+   Finalize would free the buffer), but it also means any blocks still sitting
+   on the release stacks at shutdown are not drained into the pool metadata
+   and so can be reported as leaks by CheckBlocksOnShutdown. For NeverUninstall
+   builds that want accurate leak reports, drain release stacks from
+   application code before process exit, or avoid combining UseReleaseStack
+   with EnableMemoryLeakReporting.}
+{$IFNDEF NeverUninstall}
 {$IFDEF UseReleaseStack}
   DestroyCleanupThread;
   CleanupReleaseStacks;
 {$ENDIF}
-{$IFNDEF NeverUninstall}
     {Uninstall FastMM}
     UninstallMemoryManager;
 {$ENDIF}
@@ -20585,9 +21883,9 @@ begin
       ReportLockContention;
 {$ENDIF}
 {$IFNDEF NeverUninstall}
-     {$IF Defined( FullDebugMode ) AND Defined( LoadDebugDLLDynamically )} // MS
+     {$IFDEF FullDebugMode}{$IFDEF LoadDebugDLLDynamically} // MS
      FastMM_FreeDebugSupportLibrary;
-     {$IFEND}
+     {$ENDIF}{$ENDIF}
 
       {Clean up: Free all memory. If this is a .DLL that owns its own MM, then
        it is necessary to prevent the main application from running out of
@@ -20596,8 +21894,9 @@ begin
 {$ENDIF}
     end;
 
+{$IFNDEF NeverUninstall}
   {$IFDEF MediumBlocksLockedCriticalSection}
-  LargeBlocksLocked := CLockByteFinished;
+  MediumBlocksLocked := CLockByteFinished;
   {$IFDEF fpc}DoneCriticalSection{$ELSE}DeleteCriticalSection{$ENDIF}(MediumBlocksLockedCS);
   {$ENDIF MediumBlocksLockedCriticalSection}
 
@@ -20619,7 +21918,8 @@ begin
   begin
     SmallBlockTypes[LInd].SmallBlockTypeLocked := CLockByteFinished;
   end;
-  {$ENDIF}
+  {$ENDIF SmallBlocksLockedCriticalSection}
+{$ENDIF NeverUninstall}
 
   end;
 end;
@@ -20697,7 +21997,7 @@ begin
   {$ENDIF}
   end;
 
-  {$IFDEF 32bit}
+  {$IFDEF 32BIT}
   if (NegNativeUintMaskBit(0) <> 0) or
      (NegNativeUintMaskBit(1) <> $FFFFFFFF) or
      (NegNativeUintMaskBit(2) <> $FFFFFFFE) or
@@ -20731,7 +22031,7 @@ begin
     System.RunError(reInvalidPtr);
   {$ENDIF}
   end;
-  {$ELSE 32bit}
+  {$ELSE 32BIT}
   if (NegNativeUintMaskBit(NativeUInt(0)) <> NativeUInt(0)) or
      (NegNativeUintMaskBit(NativeUInt(1)) <> NativeUInt($FFFFFFFFFFFFFFFF)) or
      (NegNativeUintMaskBit(NativeUInt(2)) <> NativeUInt($FFFFFFFFFFFFFFFE)) or
@@ -20767,7 +22067,7 @@ begin
     System.RunError(reInvalidPtr);
   {$ENDIF}
   end;
-  {$ENDIF 32bit}
+  {$ENDIF 32BIT}
 end;
 {$ENDIF}
 
@@ -20777,7 +22077,7 @@ var
   W: Word;
 begin
   W := FastMMCpuFeaturesB;
-  Result := (W shl 8) or FastMMCpuFeaturesA;
+  Result := Word((W shl 8) or FastMMCpuFeaturesA);
 end;
 
 function GetFastMMCpuFeaturesA: Byte;
@@ -20836,17 +22136,17 @@ begin
     CreateCleanupThread;
     {$ENDIF}
 
-    InitializationCodeHasRun := True;    
-    {$IF Defined( FullDebugMode ) AND Defined( LoadDebugDLLDynamically ) AND Defined( MemoryLoadLibrarySupport )}
+    InitializationCodeHasRun := True;
+    {$IFDEF FullDebugMode}{$IFDEF LoadDebugDLLDynamically}{$IFDEF MemoryLoadLibrarySupport}
     FastMM_LoadDebugSupportLibrary;
-    {$IFEND}
+    {$ENDIF}{$ENDIF}{$ENDIF}
   end;
 {$ELSE}
   InitializationCodeHasRun := True;
 {$ENDIF}
 end;
 
-{$IF Defined( FullDebugMode ) AND Defined( LoadDebugDLLDynamically )}
+{$IFDEF FullDebugMode}{$IFDEF LoadDebugDLLDynamically}
 function FastMM_IsDebugSupportLibraryLoaded: boolean;
 begin
   Result := ( FullDebugModeDLL <> 0 ) {$IFDEF MemoryLoadLibrarySupport}OR Assigned( FullDebugModeRDLL ){$ENDIF};
@@ -20898,8 +22198,8 @@ begin
     LogStackTrace := GetProcAddress(FullDebugModeDLL, 'LogStackTrace');
   end;
 
-  {$IF Defined( FullDebugMode ) AND Defined( LoadDebugDLLDynamically ) AND Defined( MemoryLoadLibrarySupport )}
-  if NOT InitializationCodeHasRun then // Resource is loaded after FastMM since we allocate Memory here .. 
+  {$IFDEF FullDebugMode}{$IFDEF LoadDebugDLLDynamically}{$IFDEF MemoryLoadLibrarySupport}
+  if NOT InitializationCodeHasRun then // Resource is loaded after FastMM since we allocate Memory here ..
     Exit;
 
   if ( FullDebugModeDLL = 0 ) then
@@ -20912,7 +22212,7 @@ begin
       LogStackTrace := MemoryGetProcAddress(FullDebugModeRDLL, 'LogStackTrace');
       end;
     end;
-  {$IFEND}
+  {$ENDIF}{$ENDIF}{$ENDIF}
   Result := ( FullDebugModeDLL <> 0 ) {$IFDEF MemoryLoadLibrarySupport}OR Assigned( FullDebugModeRDLL ){$ENDIF};
 end;
 
@@ -20942,7 +22242,7 @@ begin
 
   Result := True;
 end;
-{$IFEND}
+{$ENDIF}{$ENDIF}
 
 initialization
   RunInitializationCode;

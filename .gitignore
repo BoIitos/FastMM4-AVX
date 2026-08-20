@@ -48,12 +48,56 @@ nasm.exe
 # Test build artifacts
 /Tests/Simple/SimpleTest.dproj
 /Tests/Simple/SimpleTest.res
+/Tests/Simple/*.o
+/Tests/Simple/ppas.bat
+/Tests/Simple/ppas.sh
 /Tests/Advanced/AdvancedTest
 /Tests/Advanced/AdvancedTest64
 /Tests/Advanced/*.o
+/Tests/Advanced/ppas.bat
+/Tests/Advanced/ppas.sh
 libimpFastMM4.a
 
 # SonarQube scanner
-.scannerwork 
+.scannerwork
 
 fastmm4-avx-reports
+
+# FreePascal assembly listing of the main unit. Named rather than matched by
+# extension, so that a hand-written GNU-style .s source stays visible.
+/FastMM4.s
+
+# FreePascal split debug info
+*.dbg
+
+# FreePascal linker response files, named with the process id
+link*.res
+
+# Lazarus and Delphi per-user session files
+*.lps
+*.dsv
+
+# Delphi Linux scratch project, deliberately not versioned. TestFastMM.dpr there
+# is an unmodified IDE console scaffold whose body is a Writeln and a TODO, so it
+# asserts nothing; committing it would advertise Delphi Linux coverage that does
+# not exist. Real coverage belongs in Tests/Simple as a .dpr driven from CI.
+/Tests/DelphiLinux/
+
+# SonarQube project configuration, kept in the reports repository
+/sonar-project.properties
+
+# Local tooling metadata
+/.project/
+
+# FullDebugMode writes its event log beside the test binary as it runs, named
+# after the executable, so the pattern matches whichever test produced it.
+/Tests/Simple/*_MemoryManager_EventLog.txt
+
+# FreePascal import libraries for the test binaries. Globbed rather than named,
+# unlike the assembly listing above, because nothing hand-written is called
+# libimp anything and a second test would otherwise need a second line here.
+/Tests/Simple/libimp*.a
+
+# Language server trace, written into whatever directory the editor was started
+# from rather than into a state directory of its own.
+/lsp-debug.log

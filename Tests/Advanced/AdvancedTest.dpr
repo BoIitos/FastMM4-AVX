@@ -30,8 +30,8 @@ uses
   {$IFDEF UNIX}
   cthreads,
   {$ENDIF}
-  FastMM4 in '../../FastMM4.pas',
-  FastMM4Messages in '../../FastMM4Messages.pas',
+  FastMM4 in '..\..\FastMM4.pas',
+  FastMM4Messages in '..\..\FastMM4Messages.pas',
   {$IFDEF FPC}
   SysUtils,
   Classes;
@@ -1419,7 +1419,100 @@ begin
 end;
 
 // =============================================================================
-// Test 25: Mixed Size Random Pattern
+// Test 25: Double-Free Detection (small/medium/large)
+// =============================================================================
+procedure TestDoubleFreeDetection;
+const
+  TestName = 'DoubleFreeDetection';
+var
+  PSmall, PMedium, PLarge: Pointer;
+  SmallRaised, MediumRaised, LargeRaised: Boolean;
+  SmallWrongType, MediumWrongType, LargeWrongType: Boolean;
+begin
+  {$IFDEF FPC}
+  TestPass(TestName + ' (skipped on FPC: non-recoverable System.Error semantics)');
+  Exit;
+  {$ENDIF}
+
+  SmallRaised := False;
+  MediumRaised := False;
+  LargeRaised := False;
+  SmallWrongType := False;
+  MediumWrongType := False;
+  LargeWrongType := False;
+
+  PSmall := nil;
+  PMedium := nil;
+  PLarge := nil;
+
+  {Small block}
+  GetMem(PSmall, 64);
+  if PSmall = nil then
+  begin
+    TestFail(TestName, 'Small allocation failed');
+    Exit;
+  end;
+  FreeMem(PSmall);
+  try
+    FreeMem(PSmall);
+  except
+    on E: EInvalidPointer do
+      SmallRaised := True;
+    on E: Exception do
+      SmallWrongType := True;
+  end;
+
+  {Medium block}
+  GetMem(PMedium, 4096);
+  if PMedium = nil then
+  begin
+    TestFail(TestName, 'Medium allocation failed');
+    Exit;
+  end;
+  FreeMem(PMedium);
+  try
+    FreeMem(PMedium);
+  except
+    on E: EInvalidPointer do
+      MediumRaised := True;
+    on E: Exception do
+      MediumWrongType := True;
+  end;
+
+  {Large block}
+  GetMem(PLarge, 300 * 1024);
+  if PLarge = nil then
+  begin
+    TestFail(TestName, 'Large allocation failed');
+    Exit;
+  end;
+  FreeMem(PLarge);
+  try
+    FreeMem(PLarge);
+  except
+    on E: EInvalidPointer do
+      LargeRaised := True;
+    on E: Exception do
+      LargeWrongType := True;
+  end;
+
+  if SmallRaised and MediumRaised and LargeRaised
+     and (not SmallWrongType) and (not MediumWrongType) and (not LargeWrongType) then
+    TestPass(TestName)
+  else
+    TestFail(
+      TestName,
+      'Expected EInvalidPointer on double-free not raised for all sizes (small=' +
+      BoolToStr(SmallRaised, True) + ', medium=' + BoolToStr(MediumRaised, True) +
+      ', large=' + BoolToStr(LargeRaised, True) +
+      ', wrongTypeSmall=' + BoolToStr(SmallWrongType, True) +
+      ', wrongTypeMedium=' + BoolToStr(MediumWrongType, True) +
+      ', wrongTypeLarge=' + BoolToStr(LargeWrongType, True) + ')'
+    );
+end;
+
+// =============================================================================
+// Test 26: Mixed Size Random Pattern
 // =============================================================================
 procedure TestMixedSizeRandomPattern;
 const
@@ -1479,6 +1572,56 @@ begin
 end;
 
 // =============================================================================
+// Test: SoftInvalidFreeMem foreign pointer handling
+// =============================================================================
+{$IFDEF SoftInvalidFreeMem}
+procedure TestSoftInvalidFreeMemForeignPointer;
+const
+  TestName = 'SoftInvalidFreeMemForeignPointer';
+var
+  Buffer: PByte;
+  FakePtr: Pointer;
+  FakePoolAddr: PNativeUInt;
+  HeaderSlot: PNativeUInt;
+  Res: Integer;
+begin
+  {Simulate a foreign pointer whose header routes into the small block path.
+   We allocate a buffer, set up a fake pool structure at offset 0 whose
+   BlockType field (also at offset 0) holds an obviously invalid address,
+   then place a block header at offset 128 pointing to the fake pool.
+   FreeMem(FakePtr) reads the header, enters the small block path, reads
+   BlockType from the fake pool, and SoftInvalidFreeMem should detect it
+   as out-of-range and return 0.}
+  GetMem(Buffer, 256);
+  if Buffer = nil then
+  begin
+    TestFail(TestName, 'Buffer allocation failed');
+    Exit;
+  end;
+  try
+    FillChar(Buffer^, 256, 0);
+    {Set up fake pool at offset 0: BlockType (first field) = $DEADBEE0.
+     This value is far outside the SmallBlockTypes array.}
+    FakePoolAddr := PNativeUInt(Buffer);
+    FakePoolAddr^ := NativeUInt($DEADBEE0);
+    {Place block header at offset 128: must point to fake pool with bits 0-2
+     clear. Buffer is 8/16-byte aligned from GetMem, so bits 0-2 are clear.}
+    HeaderSlot := PNativeUInt(Buffer + 128);
+    HeaderSlot^ := NativeUInt(Buffer);
+    {FakePtr is just past the header; FreeMem subtracts BlockHeaderSize}
+    FakePtr := Pointer(Buffer + 128 + SizeOf(NativeUInt));
+    Res := FreeMem(FakePtr);
+    if Res = 0 then
+      TestPass(TestName)
+    else
+      TestFail(TestName, 'FreeMem returned ' + IntToStr(Res) + ' instead of 0');
+  finally
+    FreeMem(Buffer);
+  end;
+end;
+{$ENDIF}
+
+// =============================================================================
 // Main
 // =============================================================================
 begin
@@ -1522,11 +1665,19 @@ begin
     TestMultiplePoolStress;
     TestFreeListIntegrity;
     TestAllocationAfterLargeFree;
+    TestDoubleFreeDetection;
 
     // Size variation tests
     TestPowerOfTwoSizes;
     TestOddSizes;
     TestMixedSizeRandomPattern;
+
+    // SoftInvalidFreeMem test (only when compiled with -dSoftInvalidFreeMem)
+    {$IFDEF SoftInvalidFreeMem}
+    TestSoftInvalidFreeMemForeignPointer;
+    {$ELSE}
+    Log('[SKIP] SoftInvalidFreeMemForeignPointer (SoftInvalidFreeMem not defined)');
+    {$ENDIF}
 
     // Concurrent test (if not single-threaded)
     {$IFNDEF ForceSingleThreaded}

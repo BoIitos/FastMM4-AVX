@@ -1,0 +1,653 @@
+program FullDebugModeTest;
+// FullDebugMode regression test for FastMM4-AVX.
+//
+// Covers the four FreePascal FullDebugMode defects behind issue #68, and is
+// written so that it is also a general allocator test on Delphi:
+//
+//   1. A reused block reported as modified after being freed, GetMem then
+//      returning nil (CheckFreeBlockUnmodified).
+//   2. An access violation in the FullDebugMode counters, from a global
+//      variable named inside an assembler block.
+//   3. A reallocation that moves the block leaving the caller pointer
+//      dangling (DebugReallocMem and its var parameter).
+//   4. MemSize, FreememSize and AllocMem left nil in the memory manager
+//      record, so growing a string called address zero.
+//
+// Compile with FreePascal:
+//   fpc -B -Mdelphi -Twin64 -Px86_64 -dFullDebugMode -dNoMessageBoxes
+//       FullDebugModeTest.dpr
+//
+// Compile with Delphi: open FullDebugModeTest.dproj. FullDebugMode and
+// NoMessageBoxes are already set in the project defines.
+//
+// Windows needs FastMM_FullDebugMode.dll for 32 bit, or
+// FastMM_FullDebugMode64.dll for 64 bit, beside the executable. Both are in
+// "FullDebugMode DLL\Precompiled" in this repository.
+//
+// Modes, selected by the first command line argument:
+//   (none)              the checks that must all pass, exit code 0
+//   modify-after-free   writes into a freed block and expects the allocator
+//                       to report it, exit code 0 when it does
+//   corrupt-footer      overwrites the footer of a freed block and expects
+//                       the allocator to report it, exit code 0 when it does
+//
+// The two named modes deliberately corrupt the heap, so each one runs on its
+// own and the process stops as soon as the check is done. They also need the
+// default LogErrorsToFile setting, since they look for the event log file.
+//
+// Note for Linux: FastMM4 undefines FullDebugMode for POSIX other than macOS,
+// so on Linux this program still builds and runs but exercises the ordinary
+// allocator. The FullDebugMode specific parts are compiled out to match.
+
+{$IFNDEF UNIX}
+{$APPTYPE CONSOLE}
+{$ENDIF}
+
+{Mirror the platform rule FastMM4 applies to FullDebugMode, so that the parts
+ of this test that touch FullDebugMode only compile where the mode survives}
+{$UNDEF FullDebugModeIsActive}
+{$IFDEF FullDebugMode}
+  {$IFDEF MSWINDOWS}
+    {$DEFINE FullDebugModeIsActive}
+  {$ENDIF}
+  {$IFDEF MACOS}
+    {$DEFINE FullDebugModeIsActive}
+  {$ENDIF}
+{$ENDIF}
+
+uses
+  {$IFDEF UNIX}
+  cthreads,
+  {$ENDIF}
+  FastMM4 in '..\..\FastMM4.pas',
+  FastMM4Messages in '..\..\FastMM4Messages.pas',
+  {$IFNDEF FPC}
+  {$IFDEF POSIX}
+  {For getpid, which is what makes the temporary name here unique among the
+   processes that could be running this test at the same time. Windows and
+   FreePascal each have a temporary file API that settles this for them.}
+  Posix.Unistd,
+  {$ENDIF}
+  {$ENDIF}
+  SysUtils;
+
+{$IFDEF MSWINDOWS}
+{Imported rather than taken from a unit, the way the other tests here import
+ what they need from kernel32, so that this file does not depend on a unit name
+ that changed between Delphi versions. The ANSI entry points are the ones used
+ deliberately: the allocator opens its log with CreateFileA, so a name produced
+ by these needs no conversion to reach it unchanged.
+
+ GetTempPath answers with the directory Windows itself would use, consulting
+ TMP, TEMP and the profile in turn, so no single environment variable has to be
+ guessed at. GetTempFileName with uUnique zero creates the file as it names it,
+ which is what makes the name safe against another process picking the same
+ one.}
+const
+  CMaxPath = 260;
+
+function GetTempPathA(ABufferLength: Cardinal; ABuffer: PAnsiChar): Cardinal; stdcall;
+  external 'kernel32' name 'GetTempPathA';
+function GetTempFileNameA(APathName, APrefixString: PAnsiChar;
+  AUnique: Cardinal; ATempFileName: PAnsiChar): Cardinal; stdcall;
+  external 'kernel32' name 'GetTempFileNameA';
+{$ENDIF}
+
+const
+  TEST_PASSED = 0;
+  TEST_FAILED = 1;
+
+  {One size in each of the small, medium and large block ranges}
+  CBlockSizes: array[0..9] of Integer =
+    (1, 15, 64, 200, 1000, 5000, 30000, 100000, 300000, 1000000);
+
+var
+  GFailures: Integer = 0;
+{$IFDEF FullDebugModeIsActive}
+  {Kept alive for as long as the allocator holds the pointer passed to
+   SetMMLogFileName}
+  GLogFileName: AnsiString = '';
+{$ENDIF}
+
+procedure Say(const AText: string);
+begin
+  WriteLn(AText);
+  Flush(Output);
+end;
+
+procedure Check(ACondition: Boolean; const AWhat: string);
+begin
+  if ACondition then
+    Say('  ok    ' + AWhat)
+  else
+  begin
+    Say('  FAIL  ' + AWhat);
+    Inc(GFailures);
+  end;
+end;
+
+{$IFDEF FullDebugModeIsActive}
+{Can this exact file be created here? Creating it also truncates and removes
+ any log left by an earlier run, so a corruption check cannot be satisfied by
+ old evidence.}
+function FileCanBeCreated(const AFileName: string): Boolean;
+var
+  LHandle: THandle;
+begin
+  LHandle := THandle(FileCreate(AFileName));
+  Result := LHandle <> THandle(-1);
+  if Result then
+  begin
+    FileClose(LHandle);
+    DeleteFile(AFileName);
+    Result := not FileExists(AFileName);
+  end;
+end;
+
+{A name in the platform temporary directory that no other run holds. The
+ platform is asked where that directory is rather than one environment variable
+ being read, since TEMP is a Windows spelling and macOS supplies TMPDIR, and
+ the name is unique so that two corruption runs cannot delete each other's
+ evidence. An empty result means no such name could be obtained.}
+function TemporaryLogFileName: string;
+{$IFDEF MSWINDOWS}
+var
+  LDirectory: array[0..CMaxPath] of AnsiChar;
+  LFileName: array[0..CMaxPath] of AnsiChar;
+  LLength: Cardinal;
+{$ENDIF}
+begin
+  Result := '';
+{$IFDEF MSWINDOWS}
+  LLength := GetTempPathA(SizeOf(LDirectory), @LDirectory[0]);
+  if (LLength = 0) or (LLength >= Cardinal(SizeOf(LDirectory))) then
+    Exit;
+  if GetTempFileNameA(@LDirectory[0], 'fdm', 0, @LFileName[0]) = 0 then
+    Exit;
+  Result := string(AnsiString(PAnsiChar(@LFileName[0])));
+{$ELSE}
+  {$IFDEF FPC}
+  try
+    Result := GetTempFileName(GetTempDir, 'fdm');
+  except
+    Result := '';
+  end;
+  {$ELSE}
+  {Delphi outside Windows, where the convention is TMPDIR. The process id keeps
+   the name unique among concurrent runs, which is what the temporary file API
+   does for the other two branches.}
+  Result := GetEnvironmentVariable('TMPDIR');
+  if Result <> '' then
+    Result := IncludeTrailingPathDelimiter(Result) +
+      'FullDebugModeTest_' + IntToStr(getpid) + '_CorruptionCheck.log';
+  {$ENDIF}
+{$ENDIF}
+end;
+
+{The log file this test looks at has to be the one the allocator writes.
+ The allocator takes its name from the module name, lets the FastMMLogFilePath
+ environment variable move it, and, if the file cannot be created where it was
+ told, silently redirects to My Documents instead (AppendEventLog, around
+ FastMM4.pas:15830-15867). Naming the file settles the first two but not the
+ third, so the name is only accepted here once this test has proved it can
+ create that file itself, which leaves the allocator's own fallback unreachable.
+
+ The allocator opens the log with CreateFileA, so what it actually receives is
+ the ANSI form of the name. Everything below is therefore done on the value
+ that survives that conversion, which keeps the file this test creates, the
+ name the allocator is given and the path this test later inspects the same
+ file even where the conversion cannot represent the original.
+
+ Returns an empty string when no writable location can be found.}
+function PrepareEventLog: string;
+
+  function Accept(const ACandidate: string): Boolean;
+  begin
+    Result := ACandidate <> '';
+    if Result then
+    begin
+      GLogFileName := AnsiString(ACandidate);
+      Result := FileCanBeCreated(string(GLogFileName));
+    end;
+  end;
+
+begin
+  Result := '';
+  if not Accept(ChangeFileExt(ParamStr(0), '') + '_CorruptionCheck.log') then
+  begin
+    {The directory holding the executable is not writable, so use the one place
+     that is meant to be}
+    if not Accept(TemporaryLogFileName) then
+    begin
+      Say('  FAIL  no writable location found for the log file');
+      Exit;
+    end;
+  end;
+  Result := string(GLogFileName);
+  SetMMLogFileName(PAnsiChar(GLogFileName));
+  Say('  log     ' + Result);
+end;
+{$ENDIF}
+
+{Allocate, fill, verify and free over every size class, several times over, so
+ that blocks are reused. A reused block that is wrongly reported as modified
+ after being freed shows up here as a nil result.}
+procedure TestAllocateFillFree;
+var
+  LPointers: array[0..63] of Pointer;
+  LRound, I, J, LSize, LAllocated: Integer;
+  LOk: Boolean;
+begin
+  Say('allocate, fill and free over all size classes');
+  LOk := True;
+  for LRound := 1 to 8 do
+  begin
+    LAllocated := 0;
+    for I := 0 to High(LPointers) do
+    begin
+      LSize := CBlockSizes[I mod Length(CBlockSizes)] + LRound;
+      GetMem(LPointers[I], LSize);
+      if LPointers[I] = nil then
+      begin
+        LOk := False;
+        Break;
+      end;
+      Inc(LAllocated);
+      FillChar(LPointers[I]^, LSize, Byte(I));
+    end;
+    for I := 0 to LAllocated - 1 do
+    begin
+      LSize := CBlockSizes[I mod Length(CBlockSizes)] + LRound;
+      for J := 0 to LSize - 1 do
+        if PByte(LPointers[I])[J] <> Byte(I) then
+        begin
+          LOk := False;
+          Break;
+        end;
+    end;
+    {Free whatever was allocated on every path, so a failure part way through a
+     round does not leave blocks behind for the checks that follow}
+    for I := 0 to LAllocated - 1 do
+      FreeMem(LPointers[I]);
+    if not LOk then
+      Break;
+  end;
+  Check(LOk, '8 rounds of 64 blocks allocated, filled, verified and freed');
+end;
+
+{Grow a block far enough that it has to move, and check that the caller is left
+ with the new block rather than the freed one}
+procedure TestReallocateMoves;
+var
+  P, LBefore: Pointer;
+  I: Integer;
+  LOk: Boolean;
+begin
+  Say('reallocation that moves the block');
+  GetMem(P, 64);
+  if P = nil then
+  begin
+    Check(False, 'the initial allocation succeeded');
+    Exit;
+  end;
+  for I := 0 to 63 do
+    PByte(P)[I] := Byte(I);
+  LBefore := P;
+  ReallocMem(P, 400000);
+  LOk := P <> nil;
+  if LOk then
+  begin
+    for I := 0 to 63 do
+      if PByte(P)[I] <> Byte(I) then
+        LOk := False;
+    {Writing over the whole new block would fault if the pointer were stale}
+    FillChar(P^, 400000, $5A);
+  end
+  else
+  begin
+    {A failed reallocation clears P and leaves the original block allocated,
+     so that address is the one still to be freed.}
+    P := LBefore;
+  end;
+  FreeMem(P);
+  Check(LOk, 'a moved block returns a usable pointer with the data preserved');
+end;
+
+{Grow and shrink within the space the block already has}
+procedure TestReallocateInPlace;
+var
+  P, LPrevious: Pointer;
+  I, LStep, LStayedCount: Integer;
+  LOk, LStayed: Boolean;
+begin
+  Say('reallocation inside the existing block');
+  GetMem(P, 100);
+  if P = nil then
+  begin
+    Check(False, 'the initial allocation succeeded');
+    Exit;
+  end;
+  for I := 0 to 99 do
+    PByte(P)[I] := Byte(I);
+  {The address to compare against is the one from the step before, not the one
+   the block started at. Comparing against the original address asks whether the
+   block never moved at all, which is a different and much stronger claim: one
+   move at any step makes every later comparison false however many of the
+   remaining grows are served in place. Under FullDebugMode the first grow does
+   move, because DebugGetMem sizes the block to the request plus the debug
+   overhead and leaves no slack, so the original-address form reported nothing
+   stayed when in fact most of the grows did: 28 of the 40 on the run this was
+   measured on, FreePascal 3.2.2 for win64. The count depends on the allocator
+   and the options, so it is the shape of the result that matters rather than
+   that number.}
+  LPrevious := P;
+  LOk := True;
+  LStayed := False;
+  LStayedCount := 0;
+  for LStep := 1 to 40 do
+  begin
+    ReallocMem(P, 100 + LStep * 8);
+    if P = nil then
+    begin
+      {A failed reallocation clears P and leaves the block it was given still
+       allocated, so the address from the step before is the one that still has
+       to be freed. Losing it here would leak that block on the very run that
+       is already reporting a failure.}
+      P := LPrevious;
+      LOk := False;
+      Break;
+    end;
+    if P = LPrevious then
+    begin
+      LStayed := True;
+      Inc(LStayedCount);
+    end;
+    LPrevious := P;
+    for I := 0 to 99 do
+      if PByte(P)[I] <> Byte(I) then
+        LOk := False;
+  end;
+  if LOk then
+  begin
+    LPrevious := P;
+    ReallocMem(P, 50);
+    if P = nil then
+    begin
+      {The shrink can fail the same way the grows can, and reading through a
+       nil P would crash the test rather than report it.}
+      P := LPrevious;
+      LOk := False;
+    end
+    else
+      for I := 0 to 49 do
+        if PByte(P)[I] <> Byte(I) then
+          LOk := False;
+  end;
+  {Freed whichever way the checks went, and P names a live block on every path
+   out of the loop above. Leaving the free inside the branch would leak the
+   block on exactly the runs that already failed, and the leak report would
+   then arrive on top of the failure it did not cause.}
+  FreeMem(P);
+  Check(LOk, '40 grows and a shrink keep the contents intact');
+  Check(LStayed, 'at least one grow stayed in the same block, and '
+    + IntToStr(LStayedCount) + ' of 40 did');
+end;
+
+{Strings and dynamic arrays grow through the runtime rather than through
+ GetMem, which is what reaches MemSize and the reallocation path}
+procedure TestManagedTypes;
+var
+  S: AnsiString;
+  A: array of Integer;
+  I: Integer;
+  LOk: Boolean;
+begin
+  Say('strings and dynamic arrays');
+  S := '';
+  for I := 1 to 1500 do
+    S := S + 'abcdefghij';
+  Check(Length(S) = 15000, 'an ansistring grown 1500 times has the right length');
+  LOk := True;
+  for I := 1 to Length(S) do
+    {AnsiChar throughout: Chr returns the compiler's default character type,
+     which is not AnsiChar on Delphi}
+    if S[I] <> AnsiChar(Ord('a') + ((I - 1) mod 10)) then
+      LOk := False;
+  Check(LOk, 'the string contents are correct');
+  SetLength(A, 0);
+  for I := 1 to 3000 do
+  begin
+    SetLength(A, I);
+    A[I - 1] := I;
+  end;
+  LOk := Length(A) = 3000;
+  for I := 1 to 3000 do
+    if A[I - 1] <> I then
+      LOk := False;
+  Check(LOk, 'a dynamic array grown 3000 times holds the right values');
+  S := '';
+  SetLength(A, 0);
+end;
+
+{$IFDEF FPC}
+{The FreePascal memory manager record carries three entries that Delphi does
+ not have. They were left nil under FullDebugMode, which killed the process the
+ first time the runtime asked for the size of a block.}
+procedure TestFreePascalManagerEntries;
+var
+  P: Pointer;
+  I: Integer;
+  LZeroed: Boolean;
+begin
+  Say('the FreePascal memory manager entries');
+  P := AllocMem(256);
+  Check(P <> nil, 'AllocMem returns a block');
+  if P = nil then
+    Exit;
+  LZeroed := True;
+  for I := 0 to 255 do
+    if PByte(P)[I] <> 0 then
+      LZeroed := False;
+  Check(LZeroed, 'AllocMem zeroes the block');
+  Check(MemSize(P) >= 256, 'MemSize reports at least the requested size');
+  FreeMem(P, 256);
+  Say('  ok    FreeMem with an explicit size returned');
+end;
+
+{The FreePascal runtime frees a nil pointer without filtering it out first, so
+ the allocator has to accept one. TFPSList.Destroy does exactly that at
+ finalisation, for a list that never allocated its item array. Under
+ FullDebugMode the free path read a block header from PByte(nil) minus the
+ header size, a wild address, and faulted while checksumming it.
+
+ A fault here takes the process down, so reaching the line after each call is
+ the check. The four shapes below are the ones the runtime can produce: the
+ plain free, the sized entry with a size and with zero, and a reallocation
+ from nil, which is the sibling guard in the reallocation path.}
+procedure TestFreeNilPointer;
+var
+  P: Pointer;
+begin
+  Say('freeing a nil pointer');
+  FreeMem(nil);
+  Check(True, 'FreeMem(nil) returned');
+  FreeMem(nil, 64);
+  Check(True, 'FreeMem(nil, 64) returned, which reaches the sized entry');
+  FreeMem(nil, 0);
+  Check(True, 'FreeMem(nil, 0) returned, which stops before the delegation');
+  P := nil;
+  ReallocMem(P, 128);
+  Check(P <> nil, 'ReallocMem from nil allocates instead of reading a header');
+  ReallocMem(P, 0);
+  Check(P = nil, 'ReallocMem to zero frees and clears the pointer');
+  P := GetMem(64);
+  PByte(P)^ := 42;
+  FreeMem(P);
+  Check(True, 'a real block still round trips after all of that');
+end;
+{$ENDIF}
+
+{$IFDEF FullDebugModeIsActive}
+{Repeat the allocation checks with the whole pool scanned before every
+ operation, which is the most thorough setting FullDebugMode has}
+procedure TestWithPoolScan;
+begin
+  Say('the same allocations with the memory pool scanned before every operation');
+  FullDebugModeScanMemoryPoolBeforeEveryOperation := True;
+  try
+    TestReallocateInPlace;
+  {$IFDEF FPC}
+    {The nil guard sits above the pool scan, so it is worth running once with
+     the scan switched on: that ordering was questioned in review, and this is
+     what settles it rather than an argument.}
+    TestFreeNilPointer;
+  {$ENDIF}
+  finally
+    FullDebugModeScanMemoryPoolBeforeEveryOperation := False;
+  end;
+end;
+
+{Write into a block after freeing it and confirm that the allocator notices
+ when the block is handed out again}
+function RunModifyAfterFreeCheck: Integer;
+var
+  P, Q: Pointer;
+  LLog: string;
+begin
+  Say('modify after free detection');
+  LLog := PrepareEventLog;
+  if LLog = '' then
+  begin
+    Result := TEST_FAILED;
+    Exit;
+  end;
+  GetMem(P, 128);
+  if P = nil then
+  begin
+    Say('  FAIL  the block to corrupt could not be allocated');
+    Result := TEST_FAILED;
+    Exit;
+  end;
+  FreeMem(P);
+  PNativeUInt(P)^ := NativeUInt($DEADBEEF);
+  PByte(P)[64] := $AA;
+  GetMem(Q, 128);
+  if Q <> nil then
+    FreeMem(Q);
+  if FileExists(LLog) then
+  begin
+    Say('  ok    the change was reported');
+    Result := TEST_PASSED;
+  end
+  else
+  begin
+    Say('  FAIL  the change was not reported');
+    Result := TEST_FAILED;
+  end;
+end;
+
+{Overwrite the footer of a freed block and confirm that the allocator notices}
+function RunCorruptFooterCheck: Integer;
+const
+  CSize = 128;
+var
+  P, Q: Pointer;
+  LLog: string;
+begin
+  Say('corrupted footer detection');
+  LLog := PrepareEventLog;
+  if LLog = '' then
+  begin
+    Result := TEST_FAILED;
+    Exit;
+  end;
+  GetMem(P, CSize);
+  if P = nil then
+  begin
+    Say('  FAIL  the block to corrupt could not be allocated');
+    Result := TEST_FAILED;
+    Exit;
+  end;
+  FreeMem(P);
+  {The footer sits immediately after the user area of the block}
+  PNativeUInt(PByte(P) + CSize)^ := NativeUInt($0BADF00D);
+  GetMem(Q, CSize);
+  if Q <> nil then
+    FreeMem(Q);
+  if FileExists(LLog) then
+  begin
+    Say('  ok    the damaged footer was reported');
+    Result := TEST_PASSED;
+  end
+  else
+  begin
+    Say('  FAIL  the damaged footer was not reported');
+    Result := TEST_FAILED;
+  end;
+end;
+{$ENDIF}
+
+var
+  LMode: string;
+begin
+{$IFDEF FullDebugModeIsActive}
+  Say('FullDebugMode is active');
+{$ELSE}
+  Say('FullDebugMode is not active in this build, the general checks still run');
+{$ENDIF}
+
+  LMode := '';
+  if ParamCount > 0 then
+    LMode := LowerCase(ParamStr(1));
+
+  if LMode <> '' then
+  begin
+{$IFDEF FullDebugModeIsActive}
+    if LMode = 'modify-after-free' then
+      Halt(RunModifyAfterFreeCheck);
+    if LMode = 'corrupt-footer' then
+      Halt(RunCorruptFooterCheck);
+    Say('unknown mode: ' + LMode);
+    Halt(TEST_FAILED);
+{$ELSE}
+    {Skipping is right only where the allocator cannot offer the mode at all.
+     On a platform that supports it, a build that left the define out is the
+     silent green this test exists to prevent, so it fails instead.}
+  {$IFDEF MSWINDOWS}
+    Say('FAILED: this mode needs FullDebugMode and this build does not have it');
+    Halt(TEST_FAILED);
+  {$ELSE}
+    {$IFDEF MACOS}
+    Say('FAILED: this mode needs FullDebugMode and this build does not have it');
+    Halt(TEST_FAILED);
+    {$ELSE}
+    Say('skipped: FullDebugMode is not supported on this platform');
+    Halt(TEST_PASSED);
+    {$ENDIF}
+  {$ENDIF}
+{$ENDIF}
+  end;
+
+  TestAllocateFillFree;
+  TestReallocateMoves;
+  TestReallocateInPlace;
+  TestManagedTypes;
+{$IFDEF FPC}
+  TestFreePascalManagerEntries;
+  TestFreeNilPointer;
+{$ENDIF}
+{$IFDEF FullDebugModeIsActive}
+  TestWithPoolScan;
+{$ENDIF}
+
+  if GFailures = 0 then
+  begin
+    Say('all checks passed');
+    Halt(TEST_PASSED);
+  end
+  else
+  begin
+    Say('failures: ' + IntToStr(GFailures));
+    Halt(TEST_FAILED);
+  end;
+end.

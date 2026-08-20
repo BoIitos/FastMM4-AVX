@@ -1,6 +1,7 @@
 unit FastMM4DataCollector;
 
 {$I FastMM4Options.inc}
+{$I FastMM4CompilerDefines.inc}
 
 interface
 
@@ -95,15 +96,15 @@ type
     function GetGen1_PromoteEvery_sec: integer;
     function GetOverflowCount: TGenerationOverflowCount;
     procedure Lock;
-    function Now_ms: int64; {$IF CompilerVersion >= 23}inline;{$IFEND}
+    function Now_ms: int64; {$IFDEF XE2AndUp}inline;{$ENDIF}
     procedure SetGen1_PromoteCountOver(const value: integer);
     procedure SetGen1_PromoteEvery_sec(const value: integer);
   private
     procedure AddToGeneration(generation: integer; const aData: TPointers;
       count: integer = 1);
-    procedure CheckPromoteGeneration(generation: integer); {$IF CompilerVersion >= 23}inline;{$IFEND}
-    function FindInGeneration(generation: integer; const aData: TPointers): integer; {$IF CompilerVersion >= 23}inline;{$IFEND}
-    function FindInsertionPoint(generation, count: integer): integer; {$IF CompilerVersion >= 23}inline;{$IFEND}
+    procedure CheckPromoteGeneration(generation: integer); {$IFDEF XE2AndUp}inline;{$ENDIF}
+    function FindInGeneration(generation: integer; const aData: TPointers): integer; {$IFDEF XE2AndUp}inline;{$ENDIF}
+    function FindInsertionPoint(generation, count: integer): integer; {$IFDEF XE2AndUp}inline;{$ENDIF}
     procedure FlushAllGenerations;
     function InsertIntoGeneration(generation: integer; const dataInfo: TDataInfo): boolean;
     procedure PromoteGeneration(oldGen, newGen: integer);
@@ -381,6 +382,18 @@ begin
       SwitchToThread;
   {$endif}
 {$else}
+      {Sleep(0) gives up the rest of the time slice to another thread that is
+       ready to run and returns at once when there is none, which is why the
+       retry sits between it and Sleep(1). Windows XP gave way only to a thread
+       of equal priority; that changed with Windows Server 2003. Sleep(1) asks
+       for a millisecond, and what it waits is decided by the system clock
+       resolution and by scheduling, so it can be shorter than the millisecond
+       asked for as well as longer. SwitchToThread, compiled in place of both
+       when NeverSleepOnThreadContention and UseSwitchToThread are defined
+       together above, yields only to a thread ready on the current processor:
+       the operating system will not move execution to another processor, even
+       an idle one.
+       The three are compared in https://stackoverflow.com/a/44875696/6910868 }
       Sleep(0);
       if LockCmpxchg8(False, True, @FLocked) = False then
         Break;

@@ -122,8 +122,8 @@ calls will be used instead }
  also defined (see below) in which case it will call SwitchToThread instead of
  Sleep.
 
-*** Note: This option was added in FastMM4 version 4.68
-    on 3 July 2006, is provided only if you wish to restore old
+*** Note: This option was added in FastMM4 version 4.68,
+    is provided only if you wish to restore old
     functionality (e.g. for testing, etc.), and is not recommended
     for FastMM4-AVX, since it provides suboptimal performance compared
     to the new locking mechanism implemented in the FastMM4-AVX.
@@ -142,8 +142,8 @@ MediumBlocksLockedCriticalSection/LargeBlocksLockedCriticalSection is enabled}
  but FastMM4 loads it dynamically, so it would not fail even under very old
  versions of Windows.
 
-*** Note: This option was added in FastMM4 version 4.97
-    on 30 September 2010, is provided only if you wish to restore old
+*** Note: This option was added in FastMM4 version 4.97,
+    is provided only if you wish to restore old
     functionality (e.g. for testing, etc.), and is not recommended
     for FastMM4-AVX, since it provides suboptimal performance compared
     to the new locking mechanism implemented in the FastMM4-AVX.
@@ -160,7 +160,17 @@ suits our need. Although "xchg" has exactly the same latency and costs in terms
 of CPU cycles as "cmpxchg", it is just simpler way to do the lock that we need,
 and, according to the Occam's razor principle, simple things are better. If you
 wish to restore old functionality of FastMM4 version 4.992, disable this option,
-e.g. by defining "DontUseSimplifiedInterlockedExchangeByte" }
+e.g. by defining "DontUseSimplifiedInterlockedExchangeByte".
+
+The claim of equal cost above is not measured here for this pair. What has been
+measured is a neighbouring pair, and it points the same way: "lock add [mem]"
+and "xchg reg, [mem]" come out at the same 17.8 cycles on a Haswell-DT Core
+i5-4430 and the same 16.8 cycles on a Kaby Lake-S Core i7-7700K, against 5.0 and
+5.6 cycles for the non-locking "add [mem], reg" on those same parts. So the lock
+is what costs and the choice of locked instruction did not move the figure for
+those two. That table does not include "lock cmpxchg", so it supports the
+reasoning behind this option rather than the option itself, see
+https://stackoverflow.com/a/44959466/6910868 }
 
 {$define SimplifiedInterlockedExchangeByte}
 
@@ -170,15 +180,43 @@ CriticalSections or "pause"-based spin-wait loops instead of Sleep() or
 SwitchToThread().
 Using Sleep(0) or SwitchToThread() while waiting for a lock is a default
 approach in the original version of FastMM.
-With the new approach, the Sleep() will never be called, and SwitchToThread()
-may only be called after 5000 cycles of "pause"-based spin-wait loop.
+With the new approach, the Sleep() will never be called on the small, medium
+and large block locks these 3 options cover, and SwitchToThread()
+may only be called after 5000 iterations of the "pause"-based spin-wait loop.
+The statement is about those three locks and not about every lock in the unit:
+TStaticCollector.Lock in FastMM4DataCollector.pas keeps the older shape, and
+calls Sleep(0) and Sleep(1) by default, or SwitchToThread() when
+NeverSleepOnThreadContention and UseSwitchToThread are defined. That collector
+is compiled for lock contention logging rather than for allocation, so it is
+not on the path these 3 options are chosen for.
+That count is a number of iterations and not a number of cycles and not an
+amount of time: Intel gives "pause" about 10 cycles on the microarchitectures
+before Skylake and as many as 140 on Skylake itself, so the same 5000
+iterations are a different wait on every part this is compiled for. The
+constant is cPauseSpinWaitLoopCount in the main .pas file, where the same
+point is made beside it.
 Testing has shown that the new approach provides significant gain in
 multi-threaded scenarios, especially in situations when the number of threads
 working with the memory manager is the same or higher than the number of
 physical cores.
-Critical Sections or "pause"-based spin-wait loops implemented as
-"test, test-and-set" are much more CPU-friendly and have definitely lower
-latency than Sleep() or SwitchToThread().
+"pause"-based spin-wait loops implemented as "test, test-and-set" are more
+CPU-friendly and have lower latency than Sleep() or SwitchToThread() while the
+wait is short. A Critical Section shares that property while it is uncontended,
+where entering it is one interlocked operation in user mode, and while
+contention resolves within its spin count, the case the spin count exists for:
+only once the spin count is exhausted does it wait on a semaphore and pay the
+same kernel transition, which InitializeCriticalSectionAndSpinCount documents at
+https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-initializecriticalsectionandspincount
+The two costs being traded
+are of very different sizes: each Sleep() or SwitchToThread() call can pay a
+context switch of 10000 cycles or more and a ring 3 to ring 0 transition of 1000 or
+more, where the "pause" instruction costs about 10 cycles before Skylake and as
+many as 140 from Skylake on. The measurements are at:
+https://stackoverflow.com/a/44875567/6910868
+
+Which of the two wins therefore depends on how long the lock is actually held,
+and the Intel manual quoted there puts the boundary at waits of a few hundred
+cycles, beyond which yielding to the operating system is the better trade.
 
 When these options are enabled, FastMM4-AVX checks:
  - whether the CPU supports SSE2 and thus the "pause" instruction, and
@@ -205,12 +243,20 @@ options }
 
 
 { Use this option if you need that releasing a lock on data structure,
-i.e. writing to a synchronization variable, to use bus-locking memory store
-(lock xchg) rather than just the normal memory store (mov).
-Using bus-locking memory store to release a lock on data structure is
+i.e. writing to a synchronization variable, to use a locked memory exchange
+(xchg, which locks implicitly with a memory operand) rather than just the
+normal memory store (mov).
+Using a locked memory exchange to release a lock on data structure is
 an old approach of the original FastMM4, and is not recommended
 for FastMM4-AVX. Look for "using normal memory store" in the comment section
-at the beginning of the main .pas file for the discussion }
+at the beginning of the main .pas file for the discussion, and see
+https://stackoverflow.com/a/79993726
+for why the plain store is safe for a correctly synchronized unlock and what
+the locked exchange costs. One diagnostic is stronger under this option: with
+DebugReleaseLockByte active under DEBUG or FullDebugMode, the atomic exchange
+keeps the double-release check reliable where the plain store can let two
+erroneous concurrent releases both pass, as the comment above ReleaseLockByte
+in the main .pas file explains }
 
 {.$define InterlockedRelease}
 
@@ -250,14 +296,31 @@ be able to use efficient locking without inline assembly.}
 {.$define PurePascal}
 
 
-{Define the "EnableAsmCodeAlign" to allow using ".align" assembler
- directive for the 32-bit or 64-bit inline assembly.
+{Define the "EnableAsmCodeAlign" to allow using the align assembler directive
+ for the 32-bit or 64-bit inline assembly.
+
+ The two compilers spell that directive differently, and this unit emits
+ whichever the compiler in use accepts: FreePascal takes a bare "align 4" and
+ Delphi takes the dotted ".align 4". The "AsmAlNodot" symbol selects the bare
+ form and is defined for FreePascal only, so a sentence naming one spelling for
+ both compilers is describing neither of them.
+
  Delphi 32-bit or 64-bit compiler incorrectly encodes conditional jumps
  (used 6-byte instructions instead of just 2 bytes, so it prevents branch
  predictions. So for Embarcadero (former Borland) 32-bit or 64-bit
  Delphi, EnableAsmCodeAlign will have no effect. However, under FreePascal
- it turns on using the ".align". To force using it under Delphi, define
- "ForceAsmCodeAlign".
+ it turns the alignment on, emitted there as "align".
+
+ "ForceAsmCodeAlign" is honoured under FreePascal, and under Delphi only from
+ XE2 onwards. On older Delphi it is a no-op rather than an override of the
+ paragraph above, because the assembler there has no align directive to emit:
+ the ".align" pseudo-instruction and its CODEALIGN equivalent arrived in Delphi
+ XE, and on Delphi 7 ".align 4" is rejected as an inline assembler syntax error
+ while a bare "align 4" is an undeclared identifier. So on those compilers the
+ define used to break the build instead of aligning anything. That was issue 81.
+ Delphi XE itself is treated as not having it, one version more cautious than
+ the documentation requires, because XE2 is the version boundary this unit
+ already detects.
 
  To disable this option, define "DisableAsmCodeAlign",
  which affects both "EnableAsmCodeAlign" and "ForceAsmCodeAlign" }
@@ -600,7 +663,10 @@ Combine it with the two options below for further fine-tuning.}
   instead of pause-based loop;
   however these instructions for FastMM synchronization are not as efficient
   as pause-based loop, so only enable it if your tests show clear benefit
-  in your scenarios }
+  in your scenarios.
+  A worked umonitor/umwait spin-wait loop, and how it stands in for a
+  pause-based test-test-and-set loop, is at
+  https://stackoverflow.com/a/78095037/6910868 }
 
   {.$define EnableWaitPKG}
 {$endif}
@@ -673,6 +739,65 @@ Combine it with the two options below for further fine-tuning.}
 {.$define AlwaysClearFreedMemory}
 
 
+
+{-----------------------Foreign Pointer Compatibility-------------------------}
+
+{On some platforms (notably Delphi/Linux), the runtime library may call
+ FreeMem for pointers that were allocated by a foreign allocator (e.g. the
+ C runtime's malloc) rather than by FastMM. When such a pointer reaches
+ FreeMediumBlock, its block header typically has an invalid size (e.g. zero),
+ which FastMM's guards detect.
+
+ By default, FastMM raises a fatal error (reInvalidPtr) when it encounters
+ an invalid block header. This is the safest behavior because it prevents
+ silent heap corruption.
+
+ Enable SoftInvalidFreeMem to make FastMM return 0 (success) instead of
+ raising a fatal exception when it detects an invalid pointer. This applies
+ to all detection paths: invalid or out-of-range block size in
+ FreeMediumBlock, foreign BlockType pointer in the small block path of
+ FastFreeMem, and double-free or invalid-pointer detections in FastFreeMem
+ (Pascal and ASM). Must return 0 because Delphi _FreeMem checks
+ "if Result <> 0 then Error(reInvalidPtr)", so returning -1 would still
+ cause a fatal error. This allows the application to continue running at
+ the cost of masking potential real corruption errors.
+
+ Known scenarios where this is needed:
+ - Delphi/Linux: System.Internal.Icu.GetFncAddress calls TMarshal.FreeMem
+   for memory allocated by the ICU C shared library (issue #39). The glibc
+   chunk header is misinterpreted as a medium block with size 0.
+ - Any platform where third-party native libraries allocate memory via C
+   malloc and the Delphi RTL frees it through the Pascal memory manager.
+
+ You can enable this option in FastMM4Options.inc or pass it as a compiler
+ define: -dSoftInvalidFreeMem}
+
+{.$define SoftInvalidFreeMem}
+
+{Auto-enable SoftInvalidFreeMem on Delphi for Linux. The Delphi RTL on Linux
+ calls FreeMem on pointers allocated by the C runtime (e.g. ICU shared library
+ via System.Internal.Icu.GetFncAddress), which causes misinterpretation of
+ glibc chunk headers. FPC on Linux does not exhibit this issue. See issue #39.
+ To opt out of the auto-enable (e.g. for strict corruption detection during
+ debugging), define DisableAutoSoftInvalidFreeMem as a compiler flag or here:}
+
+{.$define DisableAutoSoftInvalidFreeMem}
+
+{$IFDEF LINUX}
+  {$IFNDEF FPC}
+    {$IFNDEF DisableAutoSoftInvalidFreeMem}
+      {$DEFINE SoftInvalidFreeMem}
+    {$ENDIF}
+  {$ENDIF}
+{$ENDIF}
+
+{When SoftInvalidFreeMem is active, FastMM must stay installed through process
+ shutdown to handle late FreeMem calls from units that finalize after FastMM
+ (e.g. System.Classes pulled in by System.SyncObjs). This is the same problem
+ as QC#14070 for BCB/IDE (see NeverUninstall documentation above).}
+{$IFDEF SoftInvalidFreeMem}
+  {$DEFINE NeverUninstall}
+{$ENDIF}
 
 {----------------------------Lock Contention Logging--------------------------}
 

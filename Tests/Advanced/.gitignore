@@ -1,2 +1,5 @@
 AdvancedTest.res
 AdvancedTest.dproj
+AdvancedTest.lpi
+backup/
+lib/

@@ -47,6 +47,8 @@ Change log:
 
 unit FastMMUsageTracker;
 
+{$I ..\..\FastMM4CompilerDefines.inc}
+
 interface
 
 uses
@@ -495,7 +497,8 @@ var
 
   procedure UpdateVMGraph(var AMemoryMap: TMemoryMapEx);
   var
-    LInd, LIndTop, I1: Cardinal;
+    LInd, LIndTop, I1: Integer;
+    LTopChunk: NativeUInt;
     LChunkState: TChunkStatusEx;
     LMBI: TMemoryBasicInformation;
     LA_Char: array[0..MAX_PATH] of Char;
@@ -506,12 +509,12 @@ var
       if AMemoryMap[LInd] = csExSysAllocated then
       begin
         {Get all the reserved memory blocks and Windows allocated memory blocks, etc.}
-        VirtualQuery(Pointer(LInd * 65536), LMBI, SizeOf(LMBI));
+        VirtualQuery(Pointer(UIntPtr(LInd) shl 16), LMBI, SizeOf(LMBI));
         if LMBI.State = MEM_COMMIT then
         begin
-          if (GetModuleFileName(DWord(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
+          if (GetModuleFileName(HMODULE(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
           begin
-            if DWord(LMBI.AllocationBase) = SysInit.HInstance then
+            if HMODULE(LMBI.AllocationBase) = SysInit.HInstance then
               LChunkState := csExSysExe
             else
               LChunkState := csExSysDLL;
@@ -522,7 +525,18 @@ var
           end;
           if LMBI.RegionSize > 65536 then
           begin
-            LIndTop := (Cardinal(LMBI.BaseAddress) + Cardinal(LMBI.RegionSize)) div 65536;
+            {Compute the last chunk the region touches in NativeUInt and clamp
+             there, because on 64-bit the chunk index of a region ending above
+             4GB exceeds High(Integer), so an Integer would wrap before any
+             clamp on it runs. The minus one keeps a 64K-aligned region end
+             from marking the next region's first chunk, which the inclusive
+             loop below would otherwise claim for this region and then skip.
+             Without the clamp the loop would write past the array end,
+             corrupting the stack, or trigger a range check error under $R+.}
+            LTopChunk := (NativeUInt(LMBI.BaseAddress) + LMBI.RegionSize - 1) shr 16;
+            if LTopChunk > NativeUInt(High(AMemoryMap)) then
+              LTopChunk := NativeUInt(High(AMemoryMap));
+            LIndTop := Integer(LTopChunk);
             // Fill up multiple tables
             for I1 := LInd to LIndTop do
               AMemoryMap[I1] := LChunkState;
@@ -561,9 +575,9 @@ var
           MEM_Commit:
             begin
               LU_MEM_COMMIT := LU_MEM_COMMIT + LR_Info.RegionSize;
-              if (GetModuleFileName(dword(LR_Info.AllocationBase), LA_Char, MAX_PATH) <> 0) then
+              if (GetModuleFileName(HMODULE(LR_Info.AllocationBase), LA_Char, MAX_PATH) <> 0) then
               begin
-                if DWord(LR_Info.AllocationBase) = SysInit.HInstance then
+                if HMODULE(LR_Info.AllocationBase) = SysInit.HInstance then
                   Cells[2, LI_I] := 'Exe'
                 else
                   Cells[2, LI_I] := 'DLL';
@@ -705,8 +719,12 @@ var
     LR_GlobalMemoryStatusEx: TMemoryStatusEx;
     LR_ProcessMemoryCounters: TProcessMemoryCounters;
     LR_SysBaseInfo: TSystem_Basic_Information;
-    LU_MinQuota: {$if CompilerVersion >= 23}NativeUInt{$else}Cardinal{$ifend};
-    LU_MaxQuota: {$if CompilerVersion >= 23}NativeUInt{$else}Cardinal{$ifend};
+    {These two are var parameters of GetProcessWorkingSetSize, which the RTL
+     declares with SIZE_T from XE2 onwards and with DWORD before, and a var
+     parameter must match the declaration exactly. XE2AndUp also covers every
+     64-bit build, since 64-bit Delphi begins at XE2.}
+    LU_MinQuota: {$IFDEF XE2AndUp}NativeUInt{$ELSE}Cardinal{$ENDIF};
+    LU_MaxQuota: {$IFDEF XE2AndUp}NativeUInt{$ELSE}Cardinal{$ENDIF};
     LI_I: Integer;
     LI_Max: Integer;
   begin
@@ -1013,7 +1031,7 @@ var
 begin
   eDLLName.Text := '';
   LChunkIndex := ARow * dgMemoryMap.ColCount + ACol;
-  eAddress.Text := Format('$%0.8x', [LChunkIndex shl 16]);
+  eAddress.Text := Format('$%0.8x', [UIntPtr(LChunkIndex) shl 16]);
 
   case FMemoryMapEx[LChunkIndex] of
 
@@ -1035,8 +1053,8 @@ begin
     csExSysExe:
       begin
         eState.Text := 'System Exe';
-        VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
-        if (GetModuleFileName(dword(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
+        VirtualQuery(Pointer(UIntPtr(LChunkIndex) shl 16), LMBI, SizeOf(LMBI));
+        if (GetModuleFileName(HMODULE(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
         begin
           eDLLName.Text := LA_Char;
         end;
@@ -1045,8 +1063,8 @@ begin
     csExSysDLL:
       begin
         eState.Text := 'System/User DLL';
-        VirtualQuery(Pointer(LChunkIndex shl 16), LMBI, SizeOf(LMBI));
-        if (GetModuleFileName(dword(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
+        VirtualQuery(Pointer(UIntPtr(LChunkIndex) shl 16), LMBI, SizeOf(LMBI));
+        if (GetModuleFileName(HMODULE(LMBI.AllocationBase), LA_Char, MAX_PATH) <> 0) then
         begin
           eDLLName.Text := LA_Char;
         end;
